@@ -1,0 +1,10 @@
+# Игнорировать виртуальное окружение
+.venv/
+
+# Игнорировать ONNX-модели
+onnx_models/v2_ctc.onnx
+
+CTC_v2_NumPy/__pycache__/
+CTC_v2_PyTorch/__pycache__/
+GigaAM_to_ONNX/__pycache__/
+__pycache__/

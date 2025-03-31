@@ -86,9 +86,37 @@ AUDIO_MODELS_DECRYPTION/
     ```
     pip install -r requirements.txt
     ```
-   Минимальные зависимости: **numpy**, **onnxruntime**. Для PyTorch-реализации дополнительно нужны **torch** и **torchaudio**.
-3. Скачайте ONNX-модель **v2_ctc.onnx** и поместите её в папку **models/**
+Минимальные зависимости: **numpy**, **onnxruntime**. Для PyTorch-реализации дополнительно нужны **torch** и **torchaudio**.
 
+Или установите всё явно:
+```
+pip install numpy==1.26.4 torch==2.2.1+cpu torchaudio==2.2.1+cpu torchvision==0.17.1+cpu hydra-core==1.3.2 librosa==0.11.0
+matplotlib==3.10.1 pydub==0.25.1 omegaconf==2.3.0 onnxruntime==1.17.3 IPython tqdm==4.67.1 git+https://github.com/salute-developers/GigaAM.git -f https://download.pytorch.org/whl/torch_stable.html --no-cache-dir
+```
+3. Скачайте ONNX-модель **v2_ctc.onnx** и поместите её в папку **models/**
+4. При работе желательно поместить файл **ffmpeg.exe** в созданую директорию виртуальной среды **.venv/Scripts**. Так безопаснее!
+5. Настроить виртуальную среду следующими командами:
+***CMD***
+```
+& "C:\Users\Vladimir\AppData\Local\Programs\Python\Python312\python.exe" -m venv .venv
+.venv/Scripts/activate
+```
+
+***Powershell***
+```
+"C:\Users\Vladimir\AppData\Local\Programs\Python\Python312\python.exe" -m venv .venv
+.venv/Scripts/activate
+```
+
+6. Проверить зависимости можно следующей командой:
+```
+pip list
+```
+
+7. После выполнения всего вышеперечисленного - запускаете либо обычный **.py** проект, либо блокнот **.ipynb** для **Jupiter Notebook**:
+```
+py '.\gigaam_conformer_v2_ctc_(raw_2).py'
+```
 ---
 
 ## Использование
