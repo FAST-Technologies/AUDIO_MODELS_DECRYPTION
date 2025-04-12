@@ -6,8 +6,7 @@ from typing import Tuple, Optional, Union
 import torch
 
 from Constants import Constants, _MODEL_NAMES
-from .GigaAM import GigaAM
-from .GigaAMASR import GigaAMASR
+from .GigaAM import GigaAM, GigaAMASR
 
 MY_CONSTANTS = Constants()
 
@@ -22,7 +21,8 @@ def _download_file(file_url: str,
     if os.path.exists(file_path):
         return file_path
 
-    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    os.makedirs(os.path.dirname(file_path),
+                exist_ok=True)
 
     with urllib.request.urlopen(file_url) as source, open(file_path, "wb") as output:
         with tqdm(

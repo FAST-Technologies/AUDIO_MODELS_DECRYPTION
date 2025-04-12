@@ -37,51 +37,40 @@ def load_audio_new_V2_0(
     elif waveform.ndim == 1:
         print("Аудио моно, оставляем как есть")
 
-    # Обработка каналов
-    # if load_type == "mono":
-    #     if waveform.ndim == 2:
-    #         print("Аудио СТЕРЕО -> МОНО (левый канал)")
-    #         waveform = waveform[0][np.newaxis, :]
-    #     elif waveform.ndim == 1:
-    #         print("Аудио уже МОНО")
-    #         waveform = waveform[np.newaxis, :]
-    #     else:
-    #         raise ValueError(f"Неподдерживаемое количество каналов в аудио - ошибка МОНО: {waveform.shape}")
-    # elif load_type == "stereo":
-    #     if waveform.ndim == 1:
-    #         print("Аудио МОНО -> СТЕРЕО (дублирование канала)")
-    #         waveform = np.stack([waveform, waveform], axis=0)
-    #     elif waveform.ndim == 2 and waveform.shape[0] == 1:
-    #         print("Псевдо-МОНО -> СТЕРЕО (дублирование канала)")
-    #         waveform = np.concatenate([waveform, waveform], axis=0)
-    #     elif waveform.ndim == 2 and waveform.shape[0] == 2:
-    #         print("Аудио уже СТЕРЕО")
-    #         waveform = waveform
-    #     elif waveform.ndim == 2 and waveform.shape[0] > 2:
-    #         print(f"Аудио с {waveform.shape[0]} каналами -> СТЕРЕО (берём первые 2 канала)")
-    #         waveform = waveform[:2, :]
-    #     else:
-    #         raise ValueError(f"Неподдерживаемое количество каналов в аудио - ошибка СТЕРЕО: {waveform.shape}")
     if load_type == "mono":
-        if waveform.shape[0] > 1:
-            print("Аудио СТЕРЕО -> МОНО (левый канал)")
-            waveform = waveform[0:1, :]
+        if waveform.ndim == 2:
+            if waveform.shape[0] > 1:
+                print("Аудио СТЕРЕО -> МОНО (левый канал)")
+                waveform = waveform[0][np.newaxis, :]  # [2, time] -> [1, time]
+            else:
+                print("Аудио уже МОНО (2D)")
+        elif waveform.ndim == 1:
+            print("Аудио уже МОНО (1D)")
+            waveform = waveform[np.newaxis, :]  # [time] -> [1, time]
         else:
-            print("Аудио уже МОНО")
+            raise ValueError(f"Неподдерживаемое количество каналов в аудио - ошибка МОНО: {waveform.ndim}")
     elif load_type == "stereo":
-        if waveform.shape[0] == 1:
+        if waveform.ndim == 1:
             print("Аудио МОНО -> СТЕРЕО (дублирование канала)")
+            waveform = np.stack([waveform, waveform], axis=0)
+        elif waveform.ndim == 2 and waveform.shape[0] == 1:
+            print("Псевдо-МОНО -> СТЕРЕО (дублирование канала)")
             waveform = np.concatenate([waveform, waveform], axis=0)
-        elif waveform.shape[0] > 2:
+        elif waveform.ndim == 2 and waveform.shape[0] == 2:
+            print("Аудио уже СТЕРЕО")
+            waveform = waveform
+        elif waveform.ndim == 2 and waveform.shape[0] > 2:
             print(f"Аудио с {waveform.shape[0]} каналами -> СТЕРЕО (берём первые 2 канала)")
             waveform = waveform[:2, :]
         else:
-            print("Аудио уже СТЕРЕО")
+            raise ValueError(f"Неподдерживаемое количество каналов в аудио - ошибка СТЕРЕО: {waveform.shape}")
     print(f"Shape after channel processing: {waveform.shape}")
 
     # Ресемплинг
     if original_sample_rate != sample_rate:
         old_length = waveform.shape[-1]
+        if original_sample_rate <= 1e-18:
+            raise ValueError("Новая длина не может быть посчитана")
         new_length = int(old_length * sample_rate / original_sample_rate)
         if new_length <= 0:
             raise ValueError(f"Ошибка ресемплинга: новая длина = {new_length}")
@@ -212,5 +201,4 @@ def compute_lfcc_V2_0(y: np.ndarray | None,
         dct_type=2,
         norm="ortho"
     )
-
     return lfcc

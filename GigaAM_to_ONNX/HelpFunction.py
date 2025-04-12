@@ -2,12 +2,9 @@ import os
 import warnings
 from pathlib import Path
 from typing import List, Optional, Tuple
-import numpy as np
 import torch
-from torch import Tensor
 from torch.jit import TracerWarning
 from subprocess import CalledProcessError, run
-import matplotlib.pyplot as plt
 
 from Constants import Constants
 MY_CONSTANTS = Constants()
@@ -73,12 +70,14 @@ def onnx_converter(
     if output_names is None:
         output_names = ["log_probs"]
 
-    Path(out_dir).mkdir(exist_ok=True, parents=True)
+    Path(out_dir).mkdir(exist_ok=True,
+                        parents=True)
     out_path = str(Path(out_dir) / f"{model_name}.onnx")
     warning_types = [UserWarning, TracerWarning]
     with warnings.catch_warnings():
         for warning_type in warning_types:
-            warnings.simplefilter("ignore", category=warning_type)
+            warnings.simplefilter("ignore",
+                                  category=warning_type)
         torch.onnx.export(
             module.to(torch.float32),
             inputs,
@@ -89,27 +88,3 @@ def onnx_converter(
             opset_version=opset_version,
         )
     print(f"Successfully ported onnx {model_name} to {out_path}.")
-
-"""
-Функция по выдаче статистики по каждому из каналов.
-"""
-def print_statistic_data(features: Tensor) -> None:
-    print("Shape:", features.shape)  # Размерность (например, [1, 64, T] для batch=1)
-    print("Data type:", features.dtype)  # Тип данных (np.float32)
-    print("Min value:", np.min(features))  # Минимальное значение
-    print("Max value:", np.max(features))  # Максимальное значение
-    print("Mean value:", np.mean(features))  # Среднее значение
-    print("Std deviation:", np.std(features))  # Стандартное отклонение
-
-    for i in range(features.shape[1]):  # для каждого из 64 признаков
-      channel = features[0, i, :]
-      print(f"Фича {i+1}: min={np.min(channel):.4f}, max={np.max(channel):.4f}, mean={np.mean(channel):.4f}")
-
-def plotter(features: Tensor) -> None:
-    plt.figure(figsize=(12, 4))
-    plt.imshow(features[0], aspect='auto', origin='lower', cmap='viridis')
-    plt.colorbar(label='Значение фичи')
-    plt.xlabel('Временные кадры')
-    plt.ylabel('Фичи')
-    plt.title('Спектрограмма фич (первые 64 канала)')
-    plt.show()

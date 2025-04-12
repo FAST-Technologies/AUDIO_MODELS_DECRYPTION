@@ -1,10 +1,12 @@
 # Игнорировать виртуальное окружение
-.venv/
+onnx_models/
 
-# Игнорировать ONNX-модели
-onnx_models/v2_ctc.onnx
-
+# Игнорировать кэш Python
 CTC_v2_NumPy/__pycache__/
 CTC_v2_PyTorch/__pycache__/
 GigaAM_to_ONNX/__pycache__/
 __pycache__/
+
+# Игнорировать временные файлы и бэкапы
+*.bak
+*.tmp

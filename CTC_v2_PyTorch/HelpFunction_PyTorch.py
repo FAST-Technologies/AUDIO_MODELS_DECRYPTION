@@ -1,10 +1,6 @@
-from pathlib import Path
-import warnings
-from typing import List, Optional, Tuple
 import numpy as np
 import torch
 from torch import Tensor
-from torch.jit import TracerWarning
 import torchaudio
 import librosa
 
@@ -12,7 +8,6 @@ from Constants import Constants
 MY_CONSTANTS = Constants()
 
 # Функция загрузки аудио
-# Первый вариант замены функции для аудио
 def load_audio_PyTorch(
     audio_path: str,
     sample_rate: int = MY_CONSTANTS.SAMPLE_RATE,
@@ -27,11 +22,6 @@ def load_audio_PyTorch(
 
     # Конвертируем в float32 для обработки
     waveform = waveform.float()
-
-    # Конвертируем в моно (если стерео)
-    # НАХОДИТЬ СРЕДНЕЕ НЕХОРОШО: ИЛИ ЮЗАЕМ 1й, или юзаем оба
-    # if waveform.dim() == 2:
-    #     waveform = waveform.mean(dim=0)
 
     if load_type == "mono":
         if waveform.dim() == 2:
@@ -65,45 +55,9 @@ def load_audio_PyTorch(
     # Точная нормализация как в оригинале
     if return_format == "float":
         waveform = waveform / 32768.0
-    else:
-        waveform = waveform.short()  # конвертируем обратно в int16
+        print("Ia yest float")
 
     return waveform
-
-# Функция экспорта в ONNX
-def onnx_converter_PyTorch(
-    model_name: str,
-    module: torch.nn.Module,
-    out_dir: str,
-    inputs: Optional[Tuple[torch.Tensor]] = None,
-    input_names: Optional[List[str]] = None,
-    output_names: Optional[List[str]] = None,
-    dynamic_axes: Optional[dict] = None,
-    opset_version: int = 17,
-) -> None:
-    if inputs is None:
-        inputs = module.input_example() if hasattr(module, "input_example") else (torch.randn(1, 64, 100), torch.tensor([100], dtype=torch.long))
-    if input_names is None:
-        input_names = ["features", "feature_lengths"]
-    if output_names is None:
-        output_names = ["log_probs"]
-
-    Path(out_dir).mkdir(exist_ok=True, parents=True)
-    out_path = str(Path(out_dir) / f"{model_name}.onnx")
-    warning_types = [UserWarning, TracerWarning]
-    with warnings.catch_warnings():
-        for warning_type in warning_types:
-            warnings.simplefilter("ignore", category=warning_type)
-        torch.onnx.export(
-            module.to(torch.float32),
-            inputs,
-            out_path,
-            input_names=input_names,
-            output_names=output_names,
-            dynamic_axes=dynamic_axes,
-            opset_version=opset_version,
-        )
-    print(f"Successfully ported onnx {model_name} to {out_path}.")
 
 """
 Функция по выдаче статистики по каждому из каналов.
@@ -167,7 +121,7 @@ def compute_lfcc_PyTorch(y: np.ndarray | None,
     power_spec = np.abs(S) ** 2  # Спектрограмма мощности
 
     # Частоты для STFT
-    freqs = np.linspace(fmin, fmax or sr / 2, n_fft // 2 + 1)
+    freqs = np.linspace(fmin, fmax or sr / 2, int(n_fft // 2 + 1))
 
     # Создаём линейные фильтры
     filters = create_linear_filters_PyTorch(n_filters, n_fft, fmin, fmax or sr / 2, freqs)

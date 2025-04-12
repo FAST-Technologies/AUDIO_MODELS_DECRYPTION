@@ -1,5 +1,3 @@
-import os
-import sys
 from typing import Tuple
 import torch
 import torch.nn as nn
@@ -7,11 +5,7 @@ from torch import Tensor
 import torchaudio
 import librosa
 
-# Add the root directory to sys.path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
 from Constants import Constants
-from .SpecScaler_PyTorch import SpecScaler_PyTorch
 from .GraphicsModule_PyTorch import PyTorchGraphicsModule
 MY_CONSTANTS = Constants()
 
@@ -52,7 +46,8 @@ class FeatureExtractor_PyTorch(nn.Module):
                   sample_rate=self.sample_rate,
                   norm="slaney"
                 )
-        PyTorchGraphicsModule.plot_fbank_PyTorch(mel_filters=mel_filters, title="Mel Filter Bank - torchaudio")
+        PyTorchGraphicsModule.plot_fbank_PyTorch(mel_filters=mel_filters,
+                                                 title="Mel Filter Bank - torchaudio")
 
         # Строим Mel Filter Blank с помощью библиотеки Librossa
         mel_filters_librosa = librosa.filters.mel(
@@ -64,13 +59,12 @@ class FeatureExtractor_PyTorch(nn.Module):
             norm="slaney",
             htk=True,
         ).T
-        PyTorchGraphicsModule.plot_fbank_PyTorch(mel_filters=torch.from_numpy(mel_filters_librosa), title="Mel Filter Bank - librosa")
+        PyTorchGraphicsModule.plot_fbank_PyTorch(mel_filters=torch.from_numpy(mel_filters_librosa),
+                                                 title="Mel Filter Bank - librosa")
 
         # Находим MSE метрику между результатами на PyTorch и Librossa
         mse = torch.square(mel_filters - mel_filters_librosa).mean().item()
         print(f"MSE between torchaudio and librosa: {mse}")
-
-        self.spec_scaler = SpecScaler_PyTorch()
 
     def out_len(self,
                 input_lengths: Tensor
@@ -78,7 +72,8 @@ class FeatureExtractor_PyTorch(nn.Module):
         """
         Calculates the output length after the feature extraction process.
         """
-        return input_lengths.div(self.hop_length, rounding_mode="floor").add(1).long()
+        return input_lengths.div(self.hop_length,
+                                 rounding_mode="floor").add(1).long()
 
     def forward(self,
                 input_signal: Tensor,
@@ -94,7 +89,8 @@ class FeatureExtractor_PyTorch(nn.Module):
             n_fft=self.n_fft,
             win_length=self.win_length,
             hop_length=self.hop_length,
-            window=torch.hann_window(self.win_length, device=input_signal.device),
+            window=torch.hann_window(self.win_length,
+                                     device=input_signal.device),
             power=2.0,
             normalized=False,
             # onesided=True,
@@ -102,9 +98,9 @@ class FeatureExtractor_PyTorch(nn.Module):
             # pad_mode="reflect",
             # return_complex=False,
         )
-
-        # mel_spec = torch.matmul(spectrogram.pow(2.0).transpose(-1, -2), self.mel_fb.to(spectrogram.device))
-        mel_spec = torch.matmul(spectrogram.transpose(-2, -1), self.mel_fb).transpose(-2, -1)
-
-        return self.spec_scaler(mel_spec), self.out_len(length)
+        mel_spec = torch.matmul(spectrogram.transpose(-2, -1),
+                                self.mel_fb).transpose(-2, -1)
+        spec_scaler = torch.log(mel_spec.clamp_(MY_CONSTANTS.MIN_LOG_TOLERANCE,
+                          MY_CONSTANTS.MAX_LOG_TOLERANCE))
+        return spec_scaler, self.out_len(length)
 
