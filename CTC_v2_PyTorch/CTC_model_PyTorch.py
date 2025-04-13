@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-
+# Модуль не используется, но присутствует как пример на PyTorch
 class CTCHead_PyTorch(nn.Module):
     """
     CTC Head module for Connectionist Temporal Classification.

@@ -9,6 +9,7 @@ from Constants import Constants
 from .GraphicsModule_PyTorch import PyTorchGraphicsModule
 MY_CONSTANTS = Constants()
 
+# Инициализация PyTorch CTC модели
 class FeatureExtractor_PyTorch(nn.Module):
     """
     Module for extracting Log-mel spectrogram features from raw audio signals.
@@ -46,8 +47,46 @@ class FeatureExtractor_PyTorch(nn.Module):
                   sample_rate=self.sample_rate,
                   norm="slaney"
                 )
+
         PyTorchGraphicsModule.plot_fbank_PyTorch(mel_filters=mel_filters,
-                                                 title="Mel Filter Bank - torchaudio")
+                                                 title="Mel Filter Bank - TorchAudio (viridis)",
+                                                 xlabel = "Frequency Bin",
+                                                 ylabel = "Mel Filter Index",
+                                                 colorbar_label = "Filter Weight",
+                                                 cmap='viridis',
+                                                 interpolation="spline16",
+                                                 grid_flag=False)
+
+        PyTorchGraphicsModule.plot_fbank_PyTorch(mel_filters=mel_filters,
+                                                 title="Mel Filter Bank - TorchAudio (jet)",
+                                                 xlabel="Frequency Bin",
+                                                 ylabel="Mel Filter Index",
+                                                 colorbar_label="Filter Weight",
+                                                 cmap='jet',
+                                                 interpolation="bicubic",
+                                                 grid_flag=False)
+
+        PyTorchGraphicsModule.plot_fbank_HZ_PyTorch(mel_filters=mel_filters,
+                                                    title="Mel Filter Hz - TorchAudio (viridis)",
+                                                    sample_rate=MY_CONSTANTS.SAMPLE_RATE,
+                                                    n_fft=MY_CONSTANTS.N_FFT_TEST,
+                                                    xlabel = "Frequency (Hz)",
+                                                    ylabel = "Mel Filter Index",
+                                                    colorbar_label = "Filter Weight",
+                                                    cmap='viridis',
+                                                    interpolation="bicubic",
+                                                    grid_flag=False)
+
+        PyTorchGraphicsModule.plot_fbank_HZ_PyTorch(mel_filters=mel_filters,
+                                                    title="Mel Filter Hz - TorchAudio (jet)",
+                                                    sample_rate=MY_CONSTANTS.SAMPLE_RATE,
+                                                    n_fft=MY_CONSTANTS.N_FFT_TEST,
+                                                    xlabel="Frequency (Hz)",
+                                                    ylabel="Mel Filter Index",
+                                                    colorbar_label="Filter Weight",
+                                                    cmap='jet',
+                                                    interpolation="bicubic",
+                                                    grid_flag=False)
 
         # Строим Mel Filter Blank с помощью библиотеки Librossa
         mel_filters_librosa = librosa.filters.mel(
@@ -60,11 +99,48 @@ class FeatureExtractor_PyTorch(nn.Module):
             htk=True,
         ).T
         PyTorchGraphicsModule.plot_fbank_PyTorch(mel_filters=torch.from_numpy(mel_filters_librosa),
-                                                 title="Mel Filter Bank - librosa")
+                                                 title="Mel Filter Bank - Librosa (viridis)",
+                                                 xlabel="Частотный диапазон",
+                                                 ylabel="Индекс Мел Фильтра",
+                                                 colorbar_label="Веса фильтра (Цветовой градиент)",
+                                                 cmap='viridis',
+                                                 interpolation="spline16",
+                                                 grid_flag=False)
+
+        PyTorchGraphicsModule.plot_fbank_PyTorch(mel_filters=torch.from_numpy(mel_filters_librosa),
+                                                 title="Mel Filter Bank - Librosa (jet)",
+                                                 xlabel="Частотный диапазон",
+                                                 ylabel="Индекс Мел Фильтра",
+                                                 colorbar_label="Веса фильтра (Цветовой градиент)",
+                                                 cmap='jet',
+                                                 interpolation="bicubic",
+                                                 grid_flag=False)
+
+        PyTorchGraphicsModule.plot_fbank_HZ_PyTorch(mel_filters=torch.from_numpy(mel_filters_librosa),
+                                                    title="Mel Filter Bank Hz - Librosa (viridis)",
+                                                    sample_rate=MY_CONSTANTS.SAMPLE_RATE,
+                                                    n_fft=MY_CONSTANTS.N_FFT_TEST,
+                                                    xlabel="Частота (Hz)",
+                                                    ylabel="Индекс Мел Фильтра",
+                                                    colorbar_label="Веса фильтра (Цветовой градиент)",
+                                                    cmap='viridis',
+                                                    interpolation="bicubic",
+                                                    grid_flag=False)
+
+        PyTorchGraphicsModule.plot_fbank_HZ_PyTorch(mel_filters=torch.from_numpy(mel_filters_librosa),
+                                                    title="Mel Filter Bank Hz - Librosa (jet)",
+                                                    sample_rate=MY_CONSTANTS.SAMPLE_RATE,
+                                                    n_fft=MY_CONSTANTS.N_FFT_TEST,
+                                                    xlabel="Частота (Hz)",
+                                                    ylabel="Индекс Мел Фильтра",
+                                                    colorbar_label="Веса фильтра (Цветовой градиент)",
+                                                    cmap='jet',
+                                                    interpolation="bicubic",
+                                                    grid_flag=False)
 
         # Находим MSE метрику между результатами на PyTorch и Librossa
         mse = torch.square(mel_filters - mel_filters_librosa).mean().item()
-        print(f"MSE between torchaudio and librosa: {mse}")
+        print(f"MSE between Torchaudio and Librosa: {mse}")
 
     def out_len(self,
                 input_lengths: Tensor
@@ -93,10 +169,10 @@ class FeatureExtractor_PyTorch(nn.Module):
                                      device=input_signal.device),
             power=2.0,
             normalized=False,
-            # onesided=True,
-            # center=True,
-            # pad_mode="reflect",
-            # return_complex=False,
+            onesided=True,
+            center=True,
+            pad_mode="reflect",
+            return_complex=False,
         )
         mel_spec = torch.matmul(spectrogram.transpose(-2, -1),
                                 self.mel_fb).transpose(-2, -1)

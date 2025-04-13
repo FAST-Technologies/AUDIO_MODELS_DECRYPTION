@@ -49,8 +49,10 @@ def load_audio(audio_path: str,
         raise RuntimeError("Failed to load audio") from exc
 
     if return_format == "float":
-        return torch.frombuffer(audio, dtype=torch.int16).float() / 32768.0
-    return torch.frombuffer(audio, dtype=torch.int16)
+        return torch.frombuffer(audio,
+                                dtype=torch.int16).float() / 32768.0
+    return torch.frombuffer(audio,
+                            dtype=torch.int16)
 
 # Функция экспорта в ONNX
 def onnx_converter(

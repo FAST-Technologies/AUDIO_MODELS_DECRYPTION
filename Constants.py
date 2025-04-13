@@ -11,8 +11,8 @@ class Constants:
       AUDIO3_PATH: str = 'E:/Прога (вся)/NeuralSpecter/AUDIO_MODELS_DECRYPTION/audio_files/-opa-kogo-to-hlopnuli.wav'
       MODEL_TYPE: str = "v2_ctc"
       MODEL_NAME: str = "v2_ctc.onnx"
-      DOWNLOAD_CACHE: str = "~/.cache/gigaam"
-      DIRNAME: str = "./onnx_models"
+      DOWNLOAD_CACHE: str = "~\.cache\gigaam"
+      DIRNAME: str = ".\onnx_models"
       BLANK_IDX: int = 33  # Blank token index for CTC
       D_MODEL: int = 768 # Model dimension (e.g., for encoder)
       DTYPE: Type[np.dtype] = np.float32

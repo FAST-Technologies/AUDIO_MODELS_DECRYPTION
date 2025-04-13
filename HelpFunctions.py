@@ -235,7 +235,7 @@ def tensor_info(flag: str,
         raise ValueError(f"Invalid flag: {flag}. Must be 'i' for inputs or 'o' for outputs.")
 
     if not tensors:
-        print("  No tensors found.")
+        print("No tensors found.")
         return
 
     for tensor in tensors:
