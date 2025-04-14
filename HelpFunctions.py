@@ -1,6 +1,7 @@
 import os
 import subprocess
 import re
+import json
 from typing import (List,
                     Dict,
                     Tuple)
@@ -12,12 +13,16 @@ from jiwer import (wer,
                    wil,
                    wip)
 from nltk.translate.bleu_score import sentence_bleu
+from nltk.translate.meteor_score import meteor_score
 from phonemizer import phonemize
 import nltk
 nltk.download('punkt')
+nltk.download('wordnet')
 
 from rouge_score import rouge_scorer  # Для ROUGE
+import pymorphy3
 from sentence_transformers import SentenceTransformer, util  # Для Semantic Similarity
+from bert_score import score as bert_score # Для BERTScore
 from torchmetrics.text import (WordErrorRate,
                                CharErrorRate,
                                BLEUScore,
@@ -26,7 +31,7 @@ from torchmetrics.text import (WordErrorRate,
                                WordInfoPreserved)
 
 # Инициализация модели для Semantic Similarity (загружаем модель один раз)
-semantic_model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')  # Модель для русского языка
+semantic_model = SentenceTransformer('sentence-transformers/LaBSE')  # Модель для русского языка
 
 # Инициализация метрик из torchmetrics
 wer_metric = WordErrorRate()
@@ -37,7 +42,93 @@ wip_metric = WordInfoPreserved()
 bleu_metric = BLEUScore(n_gram=4,
                         weights=(0.25, 0.25, 0.25, 0.25))
 
-def normalize_text(text):
+# Инициализация морфологического анализатора для русского языка
+morph = pymorphy3.MorphAnalyzer()
+
+phoneme_cache: Dict[str, List[str]] = {}
+
+# # Тест для проверки rouge-score
+# def test_rouge_scorer():
+#     scorer = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'], use_stemmer=False)
+#     # Простой тест на английском
+#     ref = "hello world"
+#     hyp = "hello world"
+#     scores = scorer.score(ref, hyp)
+#     print("Test ROUGE on English text:")
+#     for key in scores:
+#         print(f'{key}: {scores[key]}')
+#     # Тест на русском (нормализованном)
+#     ref_ru = "потому что в самолете все зависит от винта"
+#     hyp_ru = "потому что в самолете все зависит от винта"
+#     scores_ru = scorer.score(ref_ru, hyp_ru)
+#     print("Test ROUGE on Russian text:")
+#     for key in scores_ru:
+#         print(f'{key}: {scores_ru[key]}')
+#
+# # Вызов теста перед использованием return_metrics
+# test_rouge_scorer()
+def compute_rouge_manual(reference: str,
+                         hypothesis: str) -> Dict[str, float]:
+    """
+    Compute ROUGE-1, ROUGE-2, and ROUGE-L manually.
+
+    Parameters
+    ----------
+    reference : str
+        Reference text (ground truth).
+    hypothesis : str
+        Hypothesis text (transcription).
+
+    Returns
+    -------
+    Dict[str, float]
+        Dictionary with ROUGE-1, ROUGE-2, and ROUGE-L F1-scores.
+    """
+    ref_tokens = reference.split()
+    hyp_tokens = hypothesis.split()
+
+    # ROUGE-1 (униграммы)
+    ref_unigrams = set(ref_tokens)
+    hyp_unigrams = set(hyp_tokens)
+    overlapping_unigrams = len(ref_unigrams & hyp_unigrams)
+    precision_1 = overlapping_unigrams / len(hyp_tokens) if hyp_tokens else 0
+    recall_1 = overlapping_unigrams / len(ref_tokens) if ref_tokens else 0
+    f1_1 = 2 * (precision_1 * recall_1) / (precision_1 + recall_1) if (precision_1 + recall_1) > 0 else 0
+
+    # ROUGE-2 (биграммы)
+    ref_bigrams = set(tuple(ref_tokens[i:i+2]) for i in range(len(ref_tokens)-1))
+    hyp_bigrams = set(tuple(hyp_tokens[i:i+2]) for i in range(len(hyp_tokens)-1))
+    overlapping_bigrams = len(ref_bigrams & hyp_bigrams)
+    precision_2 = overlapping_bigrams / len(hyp_bigrams) if hyp_bigrams else 0
+    recall_2 = overlapping_bigrams / len(ref_bigrams) if ref_bigrams else 0
+    f1_2 = 2 * (precision_2 * recall_2) / (precision_2 + recall_2) if (precision_2 + recall_2) > 0 else 0
+
+    # ROUGE-L (наибольшая общая подпоследовательность)
+    def lcs(X, Y):
+        m, n = len(X), len(Y)
+        L = [[0] * (n + 1) for _ in range(m + 1)]
+        for i in range(m + 1):
+            for j in range(n + 1):
+                if i == 0 or j == 0:
+                    L[i][j] = 0
+                elif X[i-1] == Y[j-1]:
+                    L[i][j] = L[i-1][j-1] + 1
+                else:
+                    L[i][j] = max(L[i-1][j], L[i][j-1])
+        return L[m][n]
+
+    lcs_length = lcs(ref_tokens, hyp_tokens)
+    precision_l = lcs_length / len(hyp_tokens) if hyp_tokens else 0
+    recall_l = lcs_length / len(ref_tokens) if ref_tokens else 0
+    f1_l = 2 * (precision_l * recall_l) / (precision_l + recall_l) if (precision_l + recall_l) > 0 else 0
+
+    return {
+        "ROUGE-1": f1_1,
+        "ROUGE-2": f1_2,
+        "ROUGE-L": f1_l
+    }
+
+def normalize_text(text: str) -> str:
     """
     Normalize text by removing punctuation and extra spaces.
 
@@ -55,7 +146,49 @@ def normalize_text(text):
     text = re.sub(r'\s+', ' ', text).strip()     # Удаляем двойные пробелы
     return text
 
-def ensure_espeak_in_path():
+def lemmatize_text(text: str) -> str:
+    """
+    Lemmatize text using pymorphy2 for Russian language.
+
+    Parameters
+    ----------
+    text : str
+        Input text to lemmatize.
+
+    Returns
+    -------
+    str
+        Lemmatized text (words in normal form, joined by spaces).
+    """
+    return " ".join(morph.parse(word)[0].normal_form for word in text.split())
+
+def get_phonemes(text: str) -> List[str]:
+    """
+    Convert text to phonemes using phonemizer with caching.
+
+    Parameters
+    ----------
+    text : str
+        Input text to convert to phonemes.
+
+    Returns
+    -------
+    List[str]
+        List of phonemes.
+
+    Notes
+    -----
+    Uses a global cache (phoneme_cache) to avoid recomputing phonemes for the same text.
+    """
+    if text in phoneme_cache:
+        return phoneme_cache[text]
+    phonemes = phonemize(text,
+                         language='ru',
+                         backend='espeak').split()
+    phoneme_cache[text] = phonemes
+    return phonemes
+
+def ensure_espeak_in_path() -> None:
     """
     Ensure that espeak is available in the system PATH for phonemizer.
 
@@ -100,7 +233,8 @@ def ensure_espeak_in_path():
 
 def return_metrics(transcription: str,
                    ground_truth: str = None,
-                   metrics: Dict[str, float] = None
+                   metrics: Dict[str, float] = None,
+                   compute_semantic: bool = True
 ) -> Dict[str, float]:
     """
     Compute various evaluation metrics for comparing transcription with ground truth.
@@ -124,120 +258,133 @@ def return_metrics(transcription: str,
         - ROUGE-1, ROUGE-2, ROUGE-L
         - Semantic Similarity (cosine similarity between embeddings)
         - PER (Phoneme Error Rate)
+        - METEOR
+        - BERTScore
+
+    Raises
+    ------
+    ValueError
+        If ground truth or transcription is empty.
 
     Notes
     -----
     - Some metrics (e.g., PER, Semantic Similarity) may return None if computation fails.
-    - Texts are normalized before computing ROUGE to remove punctuation and extra spaces.
+    - Texts are normalized and lemmatized before computing ROUGE.
+    - Metrics are logged to 'metrics_log.json'.
     """
+    if not ground_truth or not transcription:
+        raise ValueError("Ground truth and transcription must be provided (not empty).")
+
     if metrics is None:
         metrics = {}
 
-    # Метрики из jiwer
-    metrics["WER"] = wer(ground_truth, transcription)  # Word Error Rate
-    metrics["CER"] = cer(ground_truth, transcription)  # Character Error Rate
-    metrics["MER"] = mer(ground_truth, transcription)  # Match Error Rate
-    metrics["WIL"] = wil(ground_truth, transcription)  # Word Information Lost
-    metrics["WIP"] = wip(ground_truth, transcription)  # Word Information Preserved
-    metrics["RIL"] = 1 - metrics["WIP"]  # Reference Information Lost (RIL = 1 - WIP)
+        # Метрики из jiwer
+    metrics["WER"] = wer(ground_truth, transcription)
+    metrics["CER"] = cer(ground_truth, transcription)
+    metrics["MER"] = mer(ground_truth, transcription)
+    metrics["WIL"] = wil(ground_truth, transcription)
+    metrics["WIP"] = wip(ground_truth, transcription)
+    metrics["RIL"] = 1 - metrics["WIP"]
 
     # Метрики из torchmetrics
-    # Input: Lists of strings, [transcription] and [ground_truth]
-    metrics["WER_torchmetrics"] = wer_metric([transcription], [ground_truth]).item()  # WER (torchmetrics)
-    metrics["CER_torchmetrics"] = cer_metric([transcription], [ground_truth]).item()  # CER (torchmetrics)
-    metrics["WIL_torchmetrics"] = wil_metric([transcription], [ground_truth]).item()  # WIL (torchmetrics)
-    metrics["MER_torchmetrics"] = mer_metric([transcription], [ground_truth]).item()  # MER (torchmetrics)
-    metrics["WIP_torchmetrics"] = wip_metric([transcription], [ground_truth]).item()  # WIP (torchmetrics)
+    metrics["WER_torchmetrics"] = wer_metric([transcription], [ground_truth]).item()
+    metrics["CER_torchmetrics"] = cer_metric([transcription], [ground_truth]).item()
+    metrics["WIL_torchmetrics"] = wil_metric([transcription], [ground_truth]).item()
+    metrics["MER_torchmetrics"] = mer_metric([transcription], [ground_truth]).item()
+    metrics["WIP_torchmetrics"] = wip_metric([transcription], [ground_truth]).item()
+    metrics["RIL_torchmetrics"] = 1 - metrics["WIP_torchmetrics"]
 
     # BLEU
-    # Split texts into tokens (lists of words)
-    # ref_tokens: List[str], hyp_tokens: List[str]
     ref_tokens = ground_truth.split()
     hyp_tokens = transcription.split()
-    # Compute BLEU score using nltk
-    # Input: [ref_tokens] (list of reference tokens), hyp_tokens (hypothesis tokens)
-    # Output: float (BLEU score in range [0, 1])
-    metrics["BLEU"] = sentence_bleu([ref_tokens],
-                                    hyp_tokens,
-                                    weights=(0.25, 0.25, 0.25, 0.25))
-
-    # BLEU из torchmetrics (для сравнения)
-    # Input: [transcription] (list of hypothesis strings), [[ground_truth]] (list of lists of reference strings)
-    # Output: float (BLEU score in range [0, 1])
-    metrics["BLEU_torchmetrics"] = bleu_metric([transcription],
-                                               [[ground_truth]]).item()
+    if len(hyp_tokens) < 4:
+        metrics["BLEU"] = 0.0
+        metrics["BLEU_torchmetrics"] = 0.0
+        print("Warning: Transcription too short for meaningful BLEU score")
+    else:
+        metrics["BLEU"] = sentence_bleu([ref_tokens], hyp_tokens, weights=(0.25, 0.25, 0.25, 0.25))
+        metrics["BLEU_torchmetrics"] = bleu_metric([transcription], [[ground_truth]]).item()
 
     # ROUGE (ROUGE-1, ROUGE-2, ROUGE-L)
-    scorer = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'],
-                                      use_stemmer=False)
-    # Normalize texts for ROUGE computation
+    scorer = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'], use_stemmer=False)
+    # Нормализация текста
     ground_truth_norm = normalize_text(ground_truth)
     transcription_norm = normalize_text(transcription)
     print(f"Ground Truth (normalized): '{ground_truth_norm}'")
     print(f"Transcription (normalized): '{transcription_norm}'")
     assert ground_truth_norm.strip() != "", "Ground Truth is empty after normalization!"
     assert transcription_norm.strip() != "", "Transcription is empty after normalization!"
-    # Compute ROUGE scores
-    # Output: Dict[str, Score], where Score contains precision, recall, and fmeasure
-    rouge_scores = scorer.score(ground_truth_norm, transcription_norm)
-    for key in rouge_scores:
-        print(f'{key}: {rouge_scores[key]}')
-    metrics["ROUGE-1"] = rouge_scores['rouge1'].fmeasure # ROUGE-1 F1-score
-    metrics["ROUGE-2"] = rouge_scores['rouge2'].fmeasure # ROUGE-2 F1-score
-    metrics["ROUGE-L"] = rouge_scores['rougeL'].fmeasure # ROUGE-L F1-score
+
+    # Для отладки: выведем токены, которые передаются в ROUGE
+    ground_truth_tokens = ground_truth_norm.split()
+    transcription_tokens = transcription_norm.split()
+    print(f"Ground Truth tokens: {ground_truth_tokens}")
+    print(f"Transcription tokens: {transcription_tokens}")
+    print([ord(c) for c in ground_truth_norm])
+    print([ord(c) for c in transcription_norm])
+
+    # Вычисляем ROUGE
+    rouge_scores = compute_rouge_manual(ground_truth_norm, transcription_norm)
+    print("ROUGE scores:")
+    for key, value in rouge_scores.items():
+        print(f"{key}: {value}")
+    metrics["ROUGE-1"] = rouge_scores["ROUGE-1"]
+    metrics["ROUGE-2"] = rouge_scores["ROUGE-2"]
+    metrics["ROUGE-L"] = rouge_scores["ROUGE-L"]
 
     # Semantic Similarity
-    try:
-        # Получаем эмбеддинги для эталона и предсказания
-        # Input: str (text)
-        # Output: np.ndarray, shape [embedding_dim] (e.g., 384 for MiniLM)
-        ref_embedding = semantic_model.encode(ground_truth,
-                                              convert_to_tensor=True)
-        hyp_embedding = semantic_model.encode(transcription,
-                                              convert_to_tensor=True)
-        # Вычисляем косинусное сходство
-        # Input: Two tensors, shape [embedding_dim]
-        # Output: float (cosine similarity in range [-1, 1])
-        semantic_similarity = util.cos_sim(ref_embedding, hyp_embedding).item()
-        metrics["Semantic Similarity"] = semantic_similarity
-    except Exception as e:
-        print(f"Error computing Semantic Similarity: {e}")
+    if compute_semantic:
+        try:
+            ref_embedding = semantic_model.encode(ground_truth,
+                                                  convert_to_tensor=True)
+            hyp_embedding = semantic_model.encode(transcription,
+                                                  convert_to_tensor=True)
+            semantic_similarity = util.cos_sim(ref_embedding, hyp_embedding).item()
+            metrics["Semantic Similarity"] = semantic_similarity
+            if semantic_similarity < 0.5:
+                print("Warning: Low semantic similarity, texts may have different meanings")
+        except Exception as e:
+            print(f"Error computing Semantic Similarity: {e}")
+            metrics["Semantic Similarity"] = None
+    else:
         metrics["Semantic Similarity"] = None
 
     # Phoneme Error Rate (PER)
     try:
-        # Сохраняем текущую рабочую директорию
-        # original_cwd = os.getcwd()
-        # # Переходим в директорию с espeak
-        # espeak_dir = r"E:\Прога (вся)\NeuralSpecter\AUDIO_MODELS_DECRYPTION\.venv\Scripts\command_line"
-        # os.chdir(espeak_dir)
-        # print(f"Changed working directory to: {espeak_dir}")
-
-        # Выполняем phonemize для преобразования текста в фонемы
-        # Input: str (text)
-        # Output: List[str] (list of phonemes)
-        ref_phonemes = phonemize(ground_truth,
-                                 language='ru',
-                                 backend='espeak').split()
-        hyp_phonemes = phonemize(transcription,
-                                 language='ru',
-                                 backend='espeak').split()
-        # Compute WER on phoneme level (Phoneme Error Rate)
-        # Input: Two strings (joined phoneme sequences)
-        # Output: float (PER in range [0, 1])
+        ref_phonemes = get_phonemes(ground_truth)
+        hyp_phonemes = get_phonemes(transcription)
         metrics["PER"] = wer(" ".join(ref_phonemes), " ".join(hyp_phonemes))
     except Exception as e:
         print(f"Error computing PER with phonemizer: {e}")
         metrics["PER"] = None
-    # finally:
-    #     # Возвращаем исходную рабочую директорию
-    #     os.chdir(original_cwd)
-    #     print(f"Restored working directory to: {original_cwd}")
+
+    # METEOR
+    try:
+        metrics["METEOR"] = meteor_score([ground_truth.split()], transcription.split())
+    except Exception as e:
+        print(f"Error computing METEOR: {e}")
+        metrics["METEOR"] = None
+
+    # BERTScore
+    try:
+        P, R, F1 = bert_score([transcription], [ground_truth], lang="ru", verbose=False)
+        metrics["BERTScore"] = F1.item()
+    except Exception as e:
+        print(f"Error computing BERTScore: {e}")
+        metrics["BERTScore"] = None
+
+    # Логирование метрик в файл
+    try:
+        with open("metrics_log.json", "a", encoding="utf-8") as file:
+            json.dump(metrics, file, indent=4, ensure_ascii=False)
+            file.write("\n")
+    except Exception as e:
+        print(f"Error logging metrics to file: {e}")
 
     print("Metrics:")
     for metric, value in metrics.items():
         if value is not None:
-            print(f"{metric}: {value:.7f}")
+            print(f"{metric}: {value:.15f}")
         else:
             print(f"{metric}: Not computed due to error")
     return metrics
@@ -307,6 +454,28 @@ def return_metrics(transcription: str,
 # Использование семантической близости (Semantic Similarity)
 # Смысл: Использует методы embeddings (BERT, FastText) для оценки семантической близости между эталоном и предсказанием
 # Значение: Косинусное сходство между эмбеддингами (от 0 до 1)
+
+# Использование METEOR (Metric for Evaluation of Translation with Explicit ORdering)
+# METEOR = P * R / ((1 - α) * R + α * P) * (1 - γ * (frag_score)^β)
+# Смысл: Метрика для оценки качества перевода или текста с учётом синонимии, морфологии и порядка слов
+# P - точность (precision): доля слов в предсказании, совпадающих с эталоном (с учётом синонимов)
+# R - полнота (recall): доля слов из эталона, найденных в предсказании
+# α - весовой коэффициент для балансировки между P и R (обычно 0.9)
+# frag_score - штраф за фрагментацию: m / u, где m - число "кусков" совпадающих слов, u - число совпавших слов
+# γ - вес штрафа за фрагментацию (обычно 0.5)
+# β - степень штрафа за фрагментацию (обычно 3.0)
+# Значение: от 0 до 1, где 1 означает идеальное совпадение
+
+# Использование BERTScore
+# BERTScore = max(cos_sim(emb_pred_i, emb_ref_j)) для каждого токена i в предсказании и j в эталоне
+# Смысл: Метрика для оценки семантической близости текста с использованием эмбеддингов BERT
+# emb_pred_i - эмбеддинг i-го токена предсказания (получается из BERT)
+# emb_ref_j - эмбеддинг j-го токена эталона (получается из BERT)
+# cos_sim - косинусное сходство между эмбеддингами токенов
+# P - средняя точность: усреднённое максимальное сходство для токенов предсказания
+# R - средняя полнота: усреднённое максимальное сходство для токенов эталона
+# F1 - гармоническое среднее между P и R
+# Значение: от 0 до 1, где 1 означает полное семантическое совпадение
 
 def tensor_info(flag: str,
                 tensors: List[rt.NodeArg]

@@ -264,8 +264,8 @@ def print_statistic_data_PyTorch(features: Union[torch.Tensor, np.ndarray],
                     channel = features_torch
                 else:
                     channel = features_torch
-                print(f"Feature {i + 1}: min={torch.min(channel).item():.4f}, "
-                      f"max={torch.max(channel).item():.4f}, mean={torch.mean(channel).item():.4f}")
+                print(f"Feature {i + 1}: min={torch.min(channel).item():.15f}, "
+                      f"max={torch.max(channel).item():.15f}, mean={torch.mean(channel).item():.15f}")
             elif stat_param == "NumPy":
                 if len(features_np.shape) == 4:  # [batch, channels, n_mels, time]
                     channel = features_np[0, i, :, :]
@@ -275,7 +275,7 @@ def print_statistic_data_PyTorch(features: Union[torch.Tensor, np.ndarray],
                     channel = features_np
                 else:
                     channel = features_np
-                print(f"Feature {i + 1}: min={np.min(channel):.4f}, max={np.max(channel):.4f}, mean={np.mean(channel):.4f}")
+                print(f"Feature {i + 1}: min={np.min(channel):.15f}, max={np.max(channel):.15f}, mean={np.mean(channel):.15f}")
 
     except Exception as e:
         print(f"Error while calculating statistics: {str(e)}")
@@ -324,9 +324,9 @@ def create_linear_filters_PyTorch(n_filters: int,
     - The implementation uses vectorized operations for efficiency.
     """
     if fmax <= fmin:
-        raise ValueError(f"fmax <= fmin, but must be greater, got fmin={fmin}, fmax={fmax}")
+        raise ValueError(f"Fmax <= fmin, but must be greater, got fmin={fmin}, fmax={fmax}")
     if n_filters <= 0:
-        raise ValueError(f"n_filters <= 0, but must be a positive value, got {n_filters}")
+        raise ValueError(f"N_filters <= 0, but must be a positive value, got {n_filters}")
     if len(freqs) == 0:
         raise ValueError("Freqs array must be not empty")
 
@@ -447,9 +447,9 @@ def compute_lfcc_PyTorch(
     if n_filters <= 0:
         raise ValueError("Number of filters must be positive, got n_filters={:.2f}".format(n_filters))
     if n_lfcc <= 0:
-        raise ValueError("n_lfcc value must be positive, got n_lfcc={:d}".format(n_lfcc))
+        raise ValueError("N_lfcc value must be positive, got n_lfcc={:d}".format(n_lfcc))
     if fmax is not None and fmin >= fmax:
-        raise ValueError(f"fmax must be greater than fmin, got fmin={fmin}, fmax={fmax}")
+        raise ValueError(f"Fmax must be greater than fmin, got fmin={fmin}, fmax={fmax}")
 
     if win_length is None:
         win_length = n_fft

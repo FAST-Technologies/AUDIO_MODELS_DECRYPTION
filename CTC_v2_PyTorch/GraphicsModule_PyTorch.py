@@ -12,7 +12,7 @@ import librosa
 from scipy.ndimage import zoom
 from scipy.interpolate import interp1d
 
-from Constants import Constants, VALID_CMAPS, VALID_INTERPOLATIONS, VALID_LANGUAGES
+from Constants import Constants, VALID_CMAPS, VALID_INTERPOLATIONS, VALID_LANGUAGES, FORMATS_IMG
 
 MY_CONSTANTS = Constants()
 from .HelpFunction_PyTorch import print_statistic_data_PyTorch
@@ -145,8 +145,8 @@ class PyTorchGraphicsModule:
         """
         if not os.path.exists(graphics_dir):
             raise ValueError(f"Graphics directory {graphics_dir} does not exist.")
-        if format not in ['png', 'jpg', 'jpeg', 'pdf', 'svg']:
-            raise ValueError(f"Unsupported format {format}, supported formats: ['png', 'jpg', 'jpeg', 'pdf', 'svg']")
+        if format not in FORMATS_IMG:
+            raise ValueError(f"Unsupported format {format}, supported formats: {' | '.join(FORMATS_IMG)}")
 
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         filename = os.path.join(graphics_dir,
@@ -650,7 +650,7 @@ class PyTorchGraphicsModule:
         plt.close(fig)
 
     @classmethod
-    def stereo_subploats_graph_PyTorch(cls,
+    def stereo_subplots_graph_PyTorch(cls,
                                        features: Tensor,
                                        suptitle: Optional[str] = 'Feature spectrogram (First 64 Channels) (Subplots)',
                                        colorbar_label: Optional[str] = 'Feature Values',

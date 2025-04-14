@@ -1,5 +1,6 @@
 from typing import Type
 import numpy as np
+import matplotlib.pyplot as plt
 from dataclasses import dataclass
 
 # Инициализация глобальных параметров
@@ -57,3 +58,4 @@ print("_MODEL_NAMES size:", len(_MODEL_NAMES))
 VALID_CMAPS = plt.colormaps()
 VALID_INTERPOLATIONS = ['nearest', 'bilinear', 'bicubic', 'spline16', 'spline36', 'hanning', 'hamming', 'hermite', 'kaiser', 'quadric', 'catrom', 'gaussian', 'bessel', 'mitchell', 'sinc', 'lanczos']
 VALID_LANGUAGES = ['EN', 'RU']
+FORMATS_IMG = ['png', 'jpg', 'jpeg', 'pdf', 'svg']

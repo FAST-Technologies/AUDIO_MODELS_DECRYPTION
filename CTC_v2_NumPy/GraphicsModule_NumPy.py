@@ -10,7 +10,7 @@ from matplotlib.axes import Axes
 from scipy.ndimage import zoom
 
 from .HelpFunction_NumPy import print_statistic_data_V2_0
-from Constants import Constants, VALID_CMAPS, VALID_INTERPOLATIONS, VALID_LANGUAGES
+from Constants import Constants, VALID_CMAPS, VALID_INTERPOLATIONS, VALID_LANGUAGES, FORMATS_IMG
 MY_CONSTANTS = Constants()
 
 logging.basicConfig(level=logging.INFO,
@@ -141,8 +141,8 @@ class NumpyGraphicsModule:
         """
         if not os.path.exists(graphics_dir):
             raise ValueError(f"Graphics directory {graphics_dir} does not exist.")
-        if format not in ['png', 'jpg', 'jpeg', 'pdf', 'svg']:
-            raise ValueError(f"Unsupported format {format}, supported formats: ['png', 'jpg', 'jpeg', 'pdf', 'svg']")
+        if format not in FORMATS_IMG:
+            raise ValueError(f"Unsupported format {format}, supported formats: {' | '.join(FORMATS_IMG)}")
 
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         filename = os.path.join(graphics_dir,
@@ -323,11 +323,11 @@ class NumpyGraphicsModule:
         if len(mel_filters.shape) != 2:
             raise ValueError(f"Expected 2D tensor for mel_filters, got shape {mel_filters.shape}")
         if sample_rate <= 0:
-            raise ValueError(f"sample_rate must be positive, got {sample_rate}")
+            raise ValueError(f"Sample_rate must be positive, got {sample_rate}")
         if n_fft <= 0:
-            raise ValueError(f"n_fft must be positive, got {n_fft}")
+            raise ValueError(f"N_fft must be positive, got {n_fft}")
         if num_xticks <= 0:
-            raise ValueError(f"num_xticks must be positive, got {num_xticks}")
+            raise ValueError(f"Num_xticks must be positive, got {num_xticks}")
         if cmap not in VALID_CMAPS:
             raise ValueError(f"Invalid cmap {cmap}, must be one of {VALID_CMAPS}")
         if interpolation not in VALID_INTERPOLATIONS:
@@ -630,7 +630,7 @@ class NumpyGraphicsModule:
     """
 
     @classmethod
-    def stereo_subploats_graph_V2_0(cls,
+    def stereo_subplots_graph_V2_0(cls,
                                     features: np.ndarray,
                                     suptitle: Optional[str] = 'Feature spectrogram (First 64 Channels) (Subplots)',
                                     colorbar_label: Optional[str] = 'Feature Values',

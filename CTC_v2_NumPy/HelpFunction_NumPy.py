@@ -316,7 +316,7 @@ def print_statistic_data_V2_0(features: np.ndarray
             else:
                 channel = features
             print(
-                f"Feature {i + 1}: min={np.min(channel):.4f}, max={np.max(channel):.4f}, mean={np.mean(channel):.4f}")
+                f"Feature {i + 1}: min={np.min(channel):.15f}, max={np.max(channel):.15f}, mean={np.mean(channel):.15f}")
     except Exception as e:
         print(f"Error while calculating statistics: {str(e)}")
 
@@ -364,9 +364,9 @@ def create_linear_filters_V2_0(n_filters: int,
     - The implementation uses vectorized operations for efficiency.
     """
     if fmax <= fmin:
-        raise ValueError(f"fmax <= fmin, but must be greater, got fmin={fmin}, fmax={fmax}")
+        raise ValueError(f"Fmax <= fmin, but must be greater, got fmin={fmin}, fmax={fmax}")
     if n_filters <= 0:
-        raise ValueError(f"n_filters <= 0, but must be a positive value, got {n_filters}")
+        raise ValueError(f"N_filters <= 0, but must be a positive value, got {n_filters}")
     if len(freqs) == 0:
         raise ValueError("Freqs array must be not empty")
 
@@ -485,9 +485,9 @@ def compute_lfcc_V2_0(y: np.ndarray | None,
     if n_filters <= 0:
         raise ValueError("Number of filters must be positive, got n_filters={:.2f}".format(n_filters))
     if n_lfcc <= 0:
-        raise ValueError("n_lfcc value must be positive, got n_lfcc={:d}".format(n_lfcc))
+        raise ValueError("N_lfcc value must be positive, got n_lfcc={:d}".format(n_lfcc))
     if fmax is not None and fmin >= fmax:
-        raise ValueError(f"fmax must be greater than fmin, got fmin={fmin}, fmax={fmax}")
+        raise ValueError(f"Fmax must be greater than fmin, got fmin={fmin}, fmax={fmax}")
 
     if win_length is None:
         win_length = n_fft

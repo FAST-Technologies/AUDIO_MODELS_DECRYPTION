@@ -367,7 +367,7 @@ PyTorchGraphicsModule.mono_graph_PyTorch(features=featuresPyMONO,
                                          grid_flag=False)
 
 # Первый график для стерео-канала (с использованием Subplots)
-PyTorchGraphicsModule.stereo_subploats_graph_PyTorch(features=featuresPySTEREO,
+PyTorchGraphicsModule.stereo_subplots_graph_PyTorch(features=featuresPySTEREO,
                                                      suptitle='Спектрограмма фич (СТЕРЕО/Subplots)',
                                                      colorbar_label='Значение фичи',
                                                      language_type="RU",
@@ -637,7 +637,7 @@ NumpyGraphicsModule.mono_graph_V2_0(features=features_NumPy_MONO,
                                     grid_flag=False)
 
 # Первый график для стерео-канала (с использованием Subplots)
-NumpyGraphicsModule.stereo_subploats_graph_V2_0(features=features_NumPy_STEREO,
+NumpyGraphicsModule.stereo_subplots_graph_V2_0(features=features_NumPy_STEREO,
                                                 suptitle='Спектрограмма фич (СТЕРЕО/Subplots)',
                                                 colorbar_label='Значение фичи',
                                                 language_type="RU",
