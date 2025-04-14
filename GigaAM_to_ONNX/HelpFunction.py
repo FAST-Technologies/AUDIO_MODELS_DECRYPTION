@@ -15,16 +15,36 @@ def load_audio(audio_path: str,
                return_format: str = "float"
 ) -> torch.Tensor:
     """
-        Load an audio file using ffmpeg and return it as a torch.Tensor.
+    Load an audio file using ffmpeg and return it as a torch.Tensor.
 
-        Args:
-            audio_path (str): Path to the audio file.
-            sample_rate (int): Desired sample rate for the audio.
-            return_format (str): Format of the returned tensor ("float" or "int16").
+    Parameters
+    ----------
+    audio_path : str
+        Path to the audio file.
+    sample_rate : int, optional
+        Desired sample rate for the audio. Defaults to MY_CONSTANTS.SAMPLE_RATE.
+    return_format : str, optional
+        Format of the returned tensor. Must be either "float" or "int16". Defaults to "float".
 
-        Returns:
-            torch.Tensor: Audio data as a tensor.
-        """
+    Returns
+    -------
+    torch.Tensor
+        Audio data as a tensor. If `return_format` is "float", the tensor contains float values
+        normalized to the range [-1.0, 1.0]. If `return_format` is "int16", the tensor contains
+        int16 values in the range [-32768, 32767].
+
+    Raises
+    ------
+    FileNotFoundError
+        If `ffmpeg.exe` is not found in the expected path (.venv/Scripts).
+    RuntimeError
+        If ffmpeg fails to load the audio file.
+
+    Notes
+    -----
+    This function uses ffmpeg to process the audio file, converting it to a mono PCM 16-bit format
+    with the specified sample rate.
+    """
     venv_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".venv", "Scripts"))
     ffmpeg_path = os.path.join(venv_path, "ffmpeg.exe")
 
@@ -43,14 +63,16 @@ def load_audio(audio_path: str,
         "-"
     ]
     try:
-        audio = run(cmd, capture_output=True, check=True).stdout
+        audio = run(cmd,
+                    capture_output=True,
+                    check=True).stdout
     except CalledProcessError as exc:
         print(f"Ошибка ffmpeg: {exc.stderr.decode()}")
         raise RuntimeError("Failed to load audio") from exc
 
     if return_format == "float":
         return torch.frombuffer(audio,
-                                dtype=torch.int16).float() / 32768.0
+                                dtype=torch.int16).float() / MY_CONSTANTS.FLOAT_DIVISOR
     return torch.frombuffer(audio,
                             dtype=torch.int16)
 
@@ -65,6 +87,40 @@ def onnx_converter(
     dynamic_axes: Optional[dict] = None,
     opset_version: int = 17,
 ) -> None:
+    """
+    Convert a PyTorch model to ONNX format and save it to a file.
+
+    Parameters
+    ----------
+    model_name : str
+        Name of the model, used to generate the output file name.
+    module : torch.nn.Module
+        The PyTorch model to convert to ONNX.
+    out_dir : str
+        Directory where the ONNX file will be saved.
+    inputs : Optional[Tuple[torch.Tensor]], optional
+        Example inputs for tracing the model. If None, attempts to use `module.input_example()`
+        if available, otherwise defaults to a tensor of shape (1, 64, 100) for features and
+        a tensor of shape (1,) for feature lengths.
+    input_names : Optional[List[str]], optional
+        Names of the input nodes in the ONNX graph. Defaults to ["features", "feature_lengths"].
+    output_names : Optional[List[str]], optional
+        Names of the output nodes in the ONNX graph. Defaults to ["log probs"].
+    dynamic_axes : Optional[dict], optional
+        Dictionary specifying which axes of the inputs/outputs are dynamic. Defaults to None.
+    opset_version : int, optional
+        ONNX opset version to use for export. Defaults to 17.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    - The model is converted to FP32 precision before export.
+    - UserWarnings and TracerWarnings are suppressed during export to avoid cluttering the output.
+    - The output file will be saved as `<out_dir>/<model_name>.onnx`.
+    """
     if inputs is None:
         inputs = module.input_example() if hasattr(module, "input_example") else (torch.randn(1, 64, 100), torch.tensor([100], dtype=torch.long))
     if input_names is None:

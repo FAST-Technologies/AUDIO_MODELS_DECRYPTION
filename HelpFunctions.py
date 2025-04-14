@@ -1,10 +1,16 @@
 import os
 import subprocess
 import re
-from typing import List, Dict, Tuple
+from typing import (List,
+                    Dict,
+                    Tuple)
 import numpy as np
 import onnxruntime as rt
-from jiwer import wer, cer, mer, wil, wip
+from jiwer import (wer,
+                   cer,
+                   mer,
+                   wil,
+                   wip)
 from nltk.translate.bleu_score import sentence_bleu
 from phonemizer import phonemize
 import nltk
@@ -12,7 +18,12 @@ nltk.download('punkt')
 
 from rouge_score import rouge_scorer  # Для ROUGE
 from sentence_transformers import SentenceTransformer, util  # Для Semantic Similarity
-from torchmetrics.text import WordErrorRate, CharErrorRate, BLEUScore, WordInfoLost, MatchErrorRate, WordInfoPreserved
+from torchmetrics.text import (WordErrorRate,
+                               CharErrorRate,
+                               BLEUScore,
+                               WordInfoLost,
+                               MatchErrorRate,
+                               WordInfoPreserved)
 
 # Инициализация модели для Semantic Similarity (загружаем модель один раз)
 semantic_model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')  # Модель для русского языка
@@ -27,11 +38,34 @@ bleu_metric = BLEUScore(n_gram=4,
                         weights=(0.25, 0.25, 0.25, 0.25))
 
 def normalize_text(text):
+    """
+    Normalize text by removing punctuation and extra spaces.
+
+    Parameters
+    ----------
+    text : str
+        Input text to normalize.
+
+    Returns
+    -------
+    str
+        Normalized text (lowercase, no punctuation, single spaces).
+    """
     text = re.sub(r'[^\w\s]', '', text.lower())  # Удаляем пунктуацию
     text = re.sub(r'\s+', ' ', text).strip()     # Удаляем двойные пробелы
     return text
 
 def ensure_espeak_in_path():
+    """
+    Ensure that espeak is available in the system PATH for phonemizer.
+
+    Raises
+    ------
+    subprocess.CalledProcessError
+        If espeak version check fails.
+    FileNotFoundError
+        If espeak executable is not found.
+    """
     current_path = os.environ.get("PATH", "")
     print(f"Current PATH: {current_path}")
 
@@ -55,7 +89,10 @@ def ensure_espeak_in_path():
             print(f"{espeak_system_path} already in PATH.")
 
     try:
-        result = subprocess.run(["espeak", "--version"], capture_output=True, text=True, check=True)
+        result = subprocess.run(["espeak", "--version"],
+                                capture_output=True,
+                                text=True,
+                                check=True)
         print(f"espeak version: {result.stdout.strip()}")
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
         print(f"Error verifying espeak: {e}")
@@ -63,63 +100,111 @@ def ensure_espeak_in_path():
 
 def return_metrics(transcription: str,
                    ground_truth: str = None,
-                   metrics=None
+                   metrics: Dict[str, float] = None
 ) -> Dict[str, float]:
+    """
+    Compute various evaluation metrics for comparing transcription with ground truth.
+
+    Parameters
+    ----------
+    transcription : str
+        Predicted transcription text.
+    ground_truth : str, optional
+        Reference (ground truth) text.
+    metrics : Dict[str, float], optional
+        Dictionary to store computed metrics. If None, a new dictionary is created.
+
+    Returns
+    -------
+    Dict[str, float]
+        Dictionary containing computed metrics:
+        - WER, CER, MER, WIL, WIP, RIL (from jiwer)
+        - WER_torchmetrics, CER_torchmetrics, WIL_torchmetrics, MER_torchmetrics, WIP_torchmetrics (from torchmetrics)
+        - BLEU, BLEU_torchmetrics
+        - ROUGE-1, ROUGE-2, ROUGE-L
+        - Semantic Similarity (cosine similarity between embeddings)
+        - PER (Phoneme Error Rate)
+
+    Notes
+    -----
+    - Some metrics (e.g., PER, Semantic Similarity) may return None if computation fails.
+    - Texts are normalized before computing ROUGE to remove punctuation and extra spaces.
+    """
     if metrics is None:
         metrics = {}
-    metrics["WER"] = wer(ground_truth, transcription)
-    metrics["CER"] = cer(ground_truth, transcription)
-    metrics["MER"] = mer(ground_truth, transcription)
-    metrics["WIL"] = wil(ground_truth, transcription)
-    metrics["WIP"] = wip(ground_truth, transcription)
-    metrics["RIL"] = 1 - metrics["WIP"]  # RIL = 1 - WIP
 
-    metrics["WER_torchmetrics"] = wer_metric([transcription], [ground_truth]).item()
-    metrics["CER_torchmetrics"] = cer_metric([transcription], [ground_truth]).item()
-    metrics["WIL_torchmetrics"] = wil_metric([transcription], [ground_truth]).item()
-    metrics["MER_torchmetrics"] = mer_metric([transcription], [ground_truth]).item()
-    metrics["WIP_torchmetrics"] = wip_metric([transcription], [ground_truth]).item()
+    # Метрики из jiwer
+    metrics["WER"] = wer(ground_truth, transcription)  # Word Error Rate
+    metrics["CER"] = cer(ground_truth, transcription)  # Character Error Rate
+    metrics["MER"] = mer(ground_truth, transcription)  # Match Error Rate
+    metrics["WIL"] = wil(ground_truth, transcription)  # Word Information Lost
+    metrics["WIP"] = wip(ground_truth, transcription)  # Word Information Preserved
+    metrics["RIL"] = 1 - metrics["WIP"]  # Reference Information Lost (RIL = 1 - WIP)
 
+    # Метрики из torchmetrics
+    # Input: Lists of strings, [transcription] and [ground_truth]
+    metrics["WER_torchmetrics"] = wer_metric([transcription], [ground_truth]).item()  # WER (torchmetrics)
+    metrics["CER_torchmetrics"] = cer_metric([transcription], [ground_truth]).item()  # CER (torchmetrics)
+    metrics["WIL_torchmetrics"] = wil_metric([transcription], [ground_truth]).item()  # WIL (torchmetrics)
+    metrics["MER_torchmetrics"] = mer_metric([transcription], [ground_truth]).item()  # MER (torchmetrics)
+    metrics["WIP_torchmetrics"] = wip_metric([transcription], [ground_truth]).item()  # WIP (torchmetrics)
+
+    # BLEU
+    # Split texts into tokens (lists of words)
+    # ref_tokens: List[str], hyp_tokens: List[str]
     ref_tokens = ground_truth.split()
     hyp_tokens = transcription.split()
+    # Compute BLEU score using nltk
+    # Input: [ref_tokens] (list of reference tokens), hyp_tokens (hypothesis tokens)
+    # Output: float (BLEU score in range [0, 1])
     metrics["BLEU"] = sentence_bleu([ref_tokens],
                                     hyp_tokens,
                                     weights=(0.25, 0.25, 0.25, 0.25))
 
     # BLEU из torchmetrics (для сравнения)
+    # Input: [transcription] (list of hypothesis strings), [[ground_truth]] (list of lists of reference strings)
+    # Output: float (BLEU score in range [0, 1])
     metrics["BLEU_torchmetrics"] = bleu_metric([transcription],
                                                [[ground_truth]]).item()
 
     # ROUGE (ROUGE-1, ROUGE-2, ROUGE-L)
     scorer = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'],
                                       use_stemmer=False)
+    # Normalize texts for ROUGE computation
     ground_truth_norm = normalize_text(ground_truth)
     transcription_norm = normalize_text(transcription)
     print(f"Ground Truth (normalized): '{ground_truth_norm}'")
     print(f"Transcription (normalized): '{transcription_norm}'")
     assert ground_truth_norm.strip() != "", "Ground Truth is empty after normalization!"
     assert transcription_norm.strip() != "", "Transcription is empty after normalization!"
+    # Compute ROUGE scores
+    # Output: Dict[str, Score], where Score contains precision, recall, and fmeasure
     rouge_scores = scorer.score(ground_truth_norm, transcription_norm)
     for key in rouge_scores:
         print(f'{key}: {rouge_scores[key]}')
-    metrics["ROUGE-1"] = rouge_scores['rouge1'].fmeasure
-    metrics["ROUGE-2"] = rouge_scores['rouge2'].fmeasure
-    metrics["ROUGE-L"] = rouge_scores['rougeL'].fmeasure
+    metrics["ROUGE-1"] = rouge_scores['rouge1'].fmeasure # ROUGE-1 F1-score
+    metrics["ROUGE-2"] = rouge_scores['rouge2'].fmeasure # ROUGE-2 F1-score
+    metrics["ROUGE-L"] = rouge_scores['rougeL'].fmeasure # ROUGE-L F1-score
 
     # Semantic Similarity
     try:
         # Получаем эмбеддинги для эталона и предсказания
+        # Input: str (text)
+        # Output: np.ndarray, shape [embedding_dim] (e.g., 384 for MiniLM)
         ref_embedding = semantic_model.encode(ground_truth,
                                               convert_to_tensor=True)
         hyp_embedding = semantic_model.encode(transcription,
                                               convert_to_tensor=True)
         # Вычисляем косинусное сходство
+        # Input: Two tensors, shape [embedding_dim]
+        # Output: float (cosine similarity in range [-1, 1])
         semantic_similarity = util.cos_sim(ref_embedding, hyp_embedding).item()
         metrics["Semantic Similarity"] = semantic_similarity
     except Exception as e:
         print(f"Error computing Semantic Similarity: {e}")
         metrics["Semantic Similarity"] = None
 
+    # Phoneme Error Rate (PER)
     try:
         # Сохраняем текущую рабочую директорию
         # original_cwd = os.getcwd()
@@ -127,13 +212,19 @@ def return_metrics(transcription: str,
         # espeak_dir = r"E:\Прога (вся)\NeuralSpecter\AUDIO_MODELS_DECRYPTION\.venv\Scripts\command_line"
         # os.chdir(espeak_dir)
         # print(f"Changed working directory to: {espeak_dir}")
-        # Выполняем phonemize
+
+        # Выполняем phonemize для преобразования текста в фонемы
+        # Input: str (text)
+        # Output: List[str] (list of phonemes)
         ref_phonemes = phonemize(ground_truth,
                                  language='ru',
                                  backend='espeak').split()
         hyp_phonemes = phonemize(transcription,
                                  language='ru',
                                  backend='espeak').split()
+        # Compute WER on phoneme level (Phoneme Error Rate)
+        # Input: Two strings (joined phoneme sequences)
+        # Output: float (PER in range [0, 1])
         metrics["PER"] = wer(" ".join(ref_phonemes), " ".join(hyp_phonemes))
     except Exception as e:
         print(f"Error computing PER with phonemizer: {e}")
@@ -223,9 +314,17 @@ def tensor_info(flag: str,
     """
     Print information about the input or output tensors of an ONNX model.
 
-    Args:
-        flag (str): Either "i" for inputs or "o" for outputs.
-        tensors (List[rt.NodeArg]): List of input or output nodes from the ONNX model.
+    Parameters
+    ----------
+    flag : str
+        Either "i" for inputs or "o" for outputs.
+    tensors : List[rt.NodeArg]
+        List of input or output nodes from the ONNX model.
+
+    Raises
+    ------
+    ValueError
+        If flag is neither 'i' nor 'o'.
     """
     if flag == "i":
         print("Inputs expected by the model:")
@@ -247,30 +346,69 @@ def decode_ctc_greedy(log_probs: np.ndarray,
                       max_vocab_idx: int,
                       ground_truth: str = None
 ) -> Tuple[str, Dict[str, float]]:
+    """
+    Perform greedy decoding on CTC log probabilities to produce a transcription.
+
+    Parameters
+    ----------
+    log_probs : np.ndarray
+        Log probabilities from the model.
+        Shape: [batch_size, seq_len, num_classes], where batch_size must be 1.
+    vocab : List[str]
+        Vocabulary list mapping token indices to characters/tokens.
+    blank_idx : int
+        Index of the blank token in the vocabulary.
+    max_vocab_idx : int
+        Maximum valid token index (len(vocab) - 1).
+    ground_truth : str, optional
+        Ground truth transcription for computing metrics.
+
+    Returns
+    -------
+    Tuple[str, Dict[str, float]]
+        - transcription : str
+            Decoded transcription.
+        - metrics : Dict[str, float]
+            Evaluation metrics (if ground_truth is provided).
+
+    Raises
+    ------
+    ValueError
+        If batch_size is not 1.
+    """
     if log_probs.shape[0] != 1:
         raise ValueError(f"Expected batch_size=1, got {log_probs.shape[0]}")
 
+    # Extract log probabilities for the single batch
+    # Shape: [seq_len, num_classes]
     log_prob = log_probs[0]
+
+    # Get the most probable token at each time step
+    # Shape: [seq_len], dtype: int
     token_ids = log_probs.argmax(-1).squeeze().tolist()
     print("Log probs shape:", log_probs.shape)
     print("Predicted token indices:", token_ids)
 
+    # Decode by removing blanks and consecutive duplicates
     decoded_ids: List[int] = []
     total_log_prob = 0.0
     prev_tok = None
     for t, tok in enumerate(token_ids):
+        # Accumulate log probability of the selected token
         total_log_prob += float(log_prob[t, tok])
         if tok > max_vocab_idx:
             print(f"Warning: Token {tok} exceeds VOCAB size ({max_vocab_idx}), skipping")
             continue
+        # Add token if it is not a blank and not a duplicate of the previous token
         if (tok != prev_tok or prev_tok == blank_idx) and tok != blank_idx:
             decoded_ids.append(tok)
         prev_tok = tok
-
+    # Convert token IDs to text using the vocabulary
     transcription = "".join(vocab[tok] for tok in decoded_ids)
     print(f"Decoded transcription (Greedy): {transcription}")
     print(f"Log probability (Greedy): {total_log_prob:.7f}")
 
+    # Compute metrics if ground truth is provided
     metrics = {}
     if ground_truth:
         metrics = return_metrics(transcription=transcription,
@@ -290,17 +428,38 @@ def decode_ctc_beam_search(
     """
     Perform beam search decoding on CTC log probabilities to produce a transcription.
 
-    Args:
-        log_probs (np.ndarray): Log probabilities from the model, shape [batch_size, seq_len, num_classes].
-        vocab (List[str]): Vocabulary list mapping token indices to characters/tokens.
-        blank_idx (int): Index of the blank token in the vocabulary.
-        max_vocab_idx (int): Maximum valid token index (len(vocab) - 1).
-        beam_width (int): Number of beams to keep at each step.
-        length_penalty (float): Length penalty to apply during beam selection.
-        ground_truth (str): Ground truth transcription for computing metrics.
+    Parameters
+    ----------
+    log_probs : np.ndarray
+        Log probabilities from the model.
+        Shape: [batch_size, seq_len, num_classes], where batch_size must be 1.
+    vocab : List[str]
+        Vocabulary list mapping token indices to characters/tokens.
+    blank_idx : int
+        Index of the blank token in the vocabulary.
+    max_vocab_idx : int
+        Maximum valid token index (len(vocab) - 1).
+    beam_width : int, optional
+        Number of beams to keep at each step. Defaults to 3.
+    length_penalty : float, optional
+        Length penalty to apply during beam selection. Defaults to 1.0.
+    ground_truth : str, optional
+        Ground truth transcription for computing metrics.
 
-    Returns:
-        Tuple[str, Dict[str, float]]: Decoded transcription and metrics.
+    Returns
+    -------
+    Tuple[str, Dict[str, float]]
+        - transcription : str
+            Decoded transcription.
+        - metrics : Dict[str, float]
+            Evaluation metrics (if ground_truth is provided).
+
+    Raises
+    ------
+    TypeError
+        If log_probs is not a numpy.ndarray.
+    ValueError
+        If batch_size is not 1, or if log_probs shape is incorrect, or if max_vocab_idx/blank_idx are invalid.
     """
     # Проверка типа и формы log_probs
     if not isinstance(log_probs, np.ndarray):
@@ -312,7 +471,9 @@ def decode_ctc_beam_search(
     if len(log_probs.shape) != 3:
         raise ValueError(f"Expected log_probs shape [batch_size, seq_len, num_classes], got {log_probs.shape}")
 
-    log_prob = log_probs[0]  # [seq_len, num_classes]
+    # Extract log probabilities for the single batch
+    # Shape: [seq_len, num_classes]
+    log_prob = log_probs[0]
     seq_len, num_classes = log_prob.shape
 
     if max_vocab_idx >= num_classes:
@@ -323,10 +484,12 @@ def decode_ctc_beam_search(
     # Инициализация лучей: (sequence, prob_blank, prob_non_blank, seq_len)
     # prob_blank — вероятность последовательности, заканчивающейся на blank
     # prob_non_blank — вероятность последовательности, заканчивающейся на non-blank
+    # Shape: Dict[Tuple[int, ...], Tuple[float, float, int]]
     beams: Dict[Tuple[int, ...], Tuple[float, float, int]] = {tuple(): (0.0, float('-inf'), 0)}
 
     # Для каждого временного шага
     for t in range(seq_len):
+        # Shape: Dict[Tuple[int, ...], Tuple[float, float, int]]
         new_beams: Dict[Tuple[int, ...], Tuple[float, float, int]] = {}
 
         # Для каждой текущей гипотезы
@@ -380,6 +543,7 @@ def decode_ctc_beam_search(
                         )
 
         # Выбираем beam_width лучших гипотез
+        # Sort beams by total probability (with length penalty) and keep top beam_width
         beams = {}
         for seq, (prob_blank, prob_non_blank, seq_len_so_far) in sorted(
             new_beams.items(),
@@ -398,6 +562,7 @@ def decode_ctc_beam_search(
     print(f"Transcription (Beam Search, beam_width={beam_width}, length_penalty={length_penalty}): {transcription}")
     print(f"Log probability (Beam Search): {best_log_prob + 1:.7f}")
 
+    # Compute metrics if ground truth is provided
     metrics = {}
     if ground_truth:
         metrics = return_metrics(transcription=transcription,

@@ -14,6 +14,20 @@ class FeatureExtractor_V2_0:
                  sample_rate: int,  # Частота дискретизации аудио (например, 16000 Гц)
                  features: int      # Количество мел-фильтров (например, 40 или 80)
     ) -> None:
+        """
+        Инициализация модуля для извлечения мел-спектрограмм.
+
+        Parameters
+        ----------
+        sample_rate : int
+            Частота дискретизации входного аудиосигнала (например, 16000 Гц).
+        features : int
+            Количество мел-фильтров (размерность признаков по частоте, например, 40 или 80).
+
+        Notes
+        -----
+        Вычисляет параметры для STFT (n_fft, hop_length, win_length) и создаёт банк мел-фильтров.
+        """
         # Инициализация параметров
         self.sample_rate = sample_rate  # Частота дискретизации входного сигнала
         self.features = features        # Количество мел-фильтров (размерность признаков по частоте)
@@ -28,6 +42,17 @@ class FeatureExtractor_V2_0:
         """
         Создает банк мел-фильтров для преобразования спектра мощности в мел-спектрограмму.
         Используется линейная аппроксимация треугольных фильтров в мел-шкале.
+
+        Returns
+        -------
+        np.ndarray
+            Матрица мел-фильтров.
+            Shape: [n_mels, n_freqs], где n_mels = self.features, n_freqs = self.n_fft // 2 + 1
+
+        Notes
+        -----
+        - Преобразует частоты из герц в мел-шкалу: mel = 1125 * ln(1 + f/700).
+        - Создаёт треугольные фильтры, равномерно распределённые в мел-шкале.
         """
         # Количество частотных бинов в спектре (половина длины БПФ + 1 из-за симметрии)
         n_freqs = int(self.n_fft // 2 + 1)  # Например, 201 для n_fft=400
@@ -64,7 +89,31 @@ class FeatureExtractor_V2_0:
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Основной метод для извлечения признаков (логарифмических мел-спектрограмм).
-        Возвращает кортеж: (мел-спектрограмма, длина выходных кадров).
+
+        Parameters
+        ----------
+        input_signal : np.ndarray
+            Входной аудиосигнал.
+            Shape: [B, channels, T] или [B, T], где B - размер батча, channels - количество каналов, T - длина сигнала.
+        length : np.ndarray
+            Длина сигнала для каждого батча.
+            Shape: [B], dtype: int
+
+        Returns
+        -------
+        Tuple[np.ndarray, np.ndarray]
+            - mel_spec : np.ndarray
+                Логарифмическая мел-спектрограмма.
+                Shape: [B, channels, n_mels, T] или [B, n_mels, T] (если channels=1), где T - количество кадров.
+            - out_lengths : np.ndarray
+                Длина выходных кадров для каждого батча.
+                Shape: [B], dtype: int64
+
+        Notes
+        -----
+        - Выполняет STFT (коротковременное преобразование Фурье) с окном Ханна.
+        - Преобразует спектр мощности в мел-спектрограмму с помощью банка мел-фильтров.
+        - Применяет логарифмическое масштабирование для сжатия динамического диапазона.
         """
         # Если сигнал двумерный [B, T], добавляем размерность канала
         if input_signal.ndim == 2:
@@ -120,7 +169,29 @@ class FeatureExtractor_V2_0:
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Делает класс вызываемым, перенаправляя вызов на метод forward.
-        Позволяет использовать объект как функцию: extractor(signal, length).
+
+        Parameters
+        ----------
+        input_signal : np.ndarray
+            Входной аудиосигнал.
+            Shape: [B, channels, T] или [B, T], где B - размер батча, channels - количество каналов, T - длина сигнала.
+        length : np.ndarray
+            Длина сигнала для каждого батча.
+            Shape: [B], dtype: int
+
+        Returns
+        -------
+        Tuple[np.ndarray, np.ndarray]
+            - mel_spec : np.ndarray
+                Логарифмическая мел-спектрограмма.
+                Shape: [B, channels, n_mels, T] или [B, n_mels, T] (если channels=1), где T - количество кадров.
+            - out_lengths : np.ndarray
+                Длина выходных кадров для каждого батча.
+                Shape: [B], dtype: int64
+
+        Notes
+        -----
+        Перенаправляет вызов на метод forward для удобства использования.
         """
         return self.forward(input_signal, length)
 
@@ -129,8 +200,25 @@ class FeatureExtractor_V2_0:
     ) -> np.ndarray:
         """
         Вычисляет длину выходных данных (количество кадров) после извлечения признаков.
+
+        Parameters
+        ----------
+        input_lengths : np.ndarray
+            Длина входных сигналов для каждого батча.
+            Shape: [B], dtype: int
+
+        Returns
+        -------
+        np.ndarray
+            Длина выходных кадров для каждого батча.
+            Shape: [B], dtype: int64
+
+        Notes
+        -----
         Учитывает шаг hop_length и длину окна n_fft.
+        Формула: (input_length - n_fft) // hop_length + 1
         """
         # Формула: (длина сигнала - длина окна) // шаг + 1
-        # Приводим к целому числу (int64) для совместимости
+        # Input shape: [B], dtype: int
+        # Output shape: [B], dtype: int64
         return (input_lengths // self.hop_length + 1).astype(np.int64)

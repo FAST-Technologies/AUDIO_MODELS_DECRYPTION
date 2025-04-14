@@ -21,6 +21,7 @@ class Constants:
       PRED_HIDDEN: int = 320
       SAMPLE_RATE: int = 16000 # Hz
       LONGFORM_THRESHOLD: int = 25 * SAMPLE_RATE
+      FLOAT_DIVISOR: float = 32768.0
       # Параметры
       N_FFT_TEST: int = SAMPLE_RATE // 40 # Number of FFT points for testing
       N_MELS_TEST: int = 64 # Number of mel filters for testing
@@ -52,3 +53,7 @@ _MODEL_NAMES = [
     "v2_ssl",
 ]
 print("_MODEL_NAMES size:", len(_MODEL_NAMES))
+
+VALID_CMAPS = plt.colormaps()
+VALID_INTERPOLATIONS = ['nearest', 'bilinear', 'bicubic', 'spline16', 'spline36', 'hanning', 'hamming', 'hermite', 'kaiser', 'quadric', 'catrom', 'gaussian', 'bessel', 'mitchell', 'sinc', 'lanczos']
+VALID_LANGUAGES = ['EN', 'RU']
