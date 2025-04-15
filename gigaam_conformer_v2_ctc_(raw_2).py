@@ -49,7 +49,7 @@ from CTC_v2_NumPy.HelpFunction_NumPy import (load_audio_new_V2_0,
                                              compute_lfcc_V2_0)
 from CTC_v2_NumPy.GraphicsModule_NumPy import NumpyGraphicsModule
 
-from HelpFunctions import (tensor_info,
+from Decode_Module import (tensor_info,
                            decode_ctc_greedy,
                            decode_ctc_beam_search)
 
@@ -74,6 +74,7 @@ length_penalties = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
 # Путь к аудиофайлу (прописаны в константах - MY_CONSTANTS)
 source_path = "E:/Прога (вся)/NeuralSpecter/AUDIO_MODELS_DECRYPTION/audio_files/20250404_174500.wav"
 ground_truth = "мне необходимо вам рассказать следующую историю о своей жизни чем четче я говорю тем лучший результат я получу"
+# ground_truth = "потому что в самолете все зависит от винта"
 if not os.path.exists(source_path):
     raise FileNotFoundError(f"Файл не найден по пути: {source_path}")
 
@@ -489,8 +490,8 @@ print("Размерность аудио (audio_NumPy_STEREO):", audio_NumPy_STE
 print(f"Диапазон значений итогового аудио: [{audio_NumPy_STEREO.min()} ; {audio_NumPy_STEREO.max()}]")
 
 # Сравнение
-print(f"Максимальное расхождение для первого примера (моно): {np.max(np.abs(audio_prev - audio_NumPy_MONO))} единиц")
-print(f"Максимальное расхождение для второго примера (стерео): {np.max(np.abs(audio_prev - audio_NumPy_STEREO))} единиц")
+# print(f"Максимальное расхождение для первого примера (моно): {np.max(np.abs(audio_prev - audio_NumPy_MONO))} единиц")
+# print(f"Максимальное расхождение для второго примера (стерео): {np.max(np.abs(audio_prev - audio_NumPy_STEREO))} единиц")
 
 # Получаем результаты для моно и стерео канала
 spectrogram_NumPy = T.Spectrogram(n_fft=n_fft_test)

@@ -2,6 +2,7 @@ import os
 import subprocess
 import re
 import json
+from datetime import datetime
 from typing import (List,
                     Dict,
                     Tuple)
@@ -19,7 +20,7 @@ import nltk
 nltk.download('punkt')
 nltk.download('wordnet')
 
-from rouge_score import rouge_scorer  # Для ROUGE
+# from rouge_score import rouge_scorer  # Для ROUGE
 import pymorphy3
 from sentence_transformers import SentenceTransformer, util  # Для Semantic Similarity
 from bert_score import score as bert_score # Для BERTScore
@@ -68,7 +69,8 @@ phoneme_cache: Dict[str, List[str]] = {}
 # # Вызов теста перед использованием return_metrics
 # test_rouge_scorer()
 def compute_rouge_manual(reference: str,
-                         hypothesis: str) -> Dict[str, float]:
+                         hypothesis: str
+) -> Dict[str, float]:
     """
     Compute ROUGE-1, ROUGE-2, and ROUGE-L manually.
 
@@ -231,10 +233,119 @@ def ensure_espeak_in_path() -> None:
         print(f"Error verifying espeak: {e}")
         raise
 
+def round_metrics(metrics: Dict[str, float],
+                  precision: int = 14
+) -> Dict[str, float]:
+    """
+    Round numerical values in the metrics dictionary to the specified precision.
+
+    Parameters
+    ----------
+    metrics : Dict[str, float]
+        Dictionary of metrics.
+    precision : int, optional
+        Number of decimal places to round to. Defaults to 14.
+
+    Returns
+    -------
+    Dict[str, float]
+        Dictionary with rounded values.
+    """
+    rounded_metrics = {}
+    for key, value in metrics.items():
+        if isinstance(value, (int, float)):
+            rounded_metrics[key] = round(value, precision)
+        else:
+            rounded_metrics[key] = value
+    return rounded_metrics
+
+def log_metrics_to_json(metrics: Dict[str, float],
+                        ground_truth: str,
+                        transcription: str,
+                        total_log_prob: float,
+                        beam_width: int,
+                        length_penalty: float,
+                        flag: str,
+                        filename: str = "metrics_log.json"
+) -> None:
+    """
+    Log metrics to a JSON file as a list of entries, including context and timestamp.
+
+    Parameters
+    ----------
+    metrics : Dict[str, float]
+        Dictionary of computed metrics.
+    ground_truth : str
+        Ground truth text.
+    transcription : str
+        Transcription text.
+    total_log_prob: float
+        Total log probability.
+    beam_width: int
+        Beam width.
+    length_penalty: float
+        Length penalty.
+    flag: str
+        Shows which method of decode is currently using
+        Options: "greedy" - greedy decoding,
+                 "beam" - decode by using a beam search
+    filename : str, optional
+        Path to the JSON log file. Defaults to "metrics_log.json".
+    """
+    if flag == "greedy":
+        entry = {
+            "timestamp": datetime.now().isoformat(),
+            "flag": flag,
+            "ground_truth": ground_truth,
+            "transcription": transcription,
+            "total_log_prob": total_log_prob,
+            "metrics": round_metrics(metrics),
+        }
+    elif flag == "beam":
+        entry = {
+            "timestamp": datetime.now().isoformat(),
+            "flag": flag,
+            "ground_truth": ground_truth,
+            "transcription": transcription,
+            "total_log_prob": total_log_prob,
+            "beam_width": beam_width,
+            "length_penalty": length_penalty,
+            "metrics": round_metrics(metrics),
+        }
+    if os.path.exists(filename):
+        try:
+            with open(filename,
+                      "r",
+                      encoding="utf-8") as file:
+                data = json.load(file)
+                if not isinstance(data, list):
+                    data = [data]
+        except (json.JSONDecodeError, FileNotFoundError) as e:
+            print(f"Error reading {filename}: {e}. Starting with an empty list!")
+            data = []
+    else:
+        data = []
+
+    data.append(entry)
+    try:
+        with open(filename,
+                  "w",
+                  encoding="utf-8") as file:
+            json.dump(data,
+                      file,
+                      indent=4,
+                      ensure_ascii=False)
+    except Exception as e:
+        print(f"Error writing to {filename}: {e}")
+
 def return_metrics(transcription: str,
                    ground_truth: str = None,
                    metrics: Dict[str, float] = None,
-                   compute_semantic: bool = True
+                   compute_semantic: bool = True,
+                   total_log_prob: float = 0.0,
+                   beam_width: int = 3,
+                   length_penalty: float = 1.0,
+                   flag: str = "greedy"
 ) -> Dict[str, float]:
     """
     Compute various evaluation metrics for comparing transcription with ground truth.
@@ -247,6 +358,18 @@ def return_metrics(transcription: str,
         Reference (ground truth) text.
     metrics : Dict[str, float], optional
         Dictionary to store computed metrics. If None, a new dictionary is created.
+    compute_semantic: bool, optional
+        Flag that shows need we to count Semantic Similarity or not.
+    total_log_prob: float
+        Total log probability.
+    beam_width : int, optional
+        Number of beams to keep at each step. Defaults to 3.
+    length_penalty : float, optional
+        Length penalty to apply during beam selection. Defaults to 1.0.
+    flag: str
+        Shows which method of decode is currently using
+        Options: "greedy" - greedy decoding,
+                 "beam" - decode by using a beam search
 
     Returns
     -------
@@ -302,11 +425,15 @@ def return_metrics(transcription: str,
         metrics["BLEU_torchmetrics"] = 0.0
         print("Warning: Transcription too short for meaningful BLEU score")
     else:
-        metrics["BLEU"] = sentence_bleu([ref_tokens], hyp_tokens, weights=(0.25, 0.25, 0.25, 0.25))
+        metrics["BLEU"] = sentence_bleu([ref_tokens],
+                                        hyp_tokens,
+                                        weights=(0.25, 0.25, 0.25, 0.25))
         metrics["BLEU_torchmetrics"] = bleu_metric([transcription], [[ground_truth]]).item()
 
     # ROUGE (ROUGE-1, ROUGE-2, ROUGE-L)
-    scorer = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'], use_stemmer=False)
+    # Вариант ниже работает только с английским текстом, не поддерживая кириллицу
+    # scorer = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'],
+    #                                   use_stemmer=False)
     # Нормализация текста
     ground_truth_norm = normalize_text(ground_truth)
     transcription_norm = normalize_text(transcription)
@@ -324,7 +451,8 @@ def return_metrics(transcription: str,
     print([ord(c) for c in transcription_norm])
 
     # Вычисляем ROUGE
-    rouge_scores = compute_rouge_manual(ground_truth_norm, transcription_norm)
+    rouge_scores = compute_rouge_manual(ground_truth_norm,
+                                        transcription_norm)
     print("ROUGE scores:")
     for key, value in rouge_scores.items():
         print(f"{key}: {value}")
@@ -367,19 +495,24 @@ def return_metrics(transcription: str,
 
     # BERTScore
     try:
-        P, R, F1 = bert_score([transcription], [ground_truth], lang="ru", verbose=False)
+        P, R, F1 = bert_score([transcription],
+                              [ground_truth],
+                              lang="ru",
+                              verbose=False)
         metrics["BERTScore"] = F1.item()
     except Exception as e:
         print(f"Error computing BERTScore: {e}")
         metrics["BERTScore"] = None
 
     # Логирование метрик в файл
-    try:
-        with open("metrics_log.json", "a", encoding="utf-8") as file:
-            json.dump(metrics, file, indent=4, ensure_ascii=False)
-            file.write("\n")
-    except Exception as e:
-        print(f"Error logging metrics to file: {e}")
+    log_metrics_to_json(metrics=metrics,
+                        ground_truth=ground_truth,
+                        transcription=transcription,
+                        total_log_prob=total_log_prob,
+                        beam_width=beam_width,
+                        length_penalty=length_penalty,
+                        flag=flag
+                        )
 
     print("Metrics:")
     for metric, value in metrics.items():
@@ -575,14 +708,16 @@ def decode_ctc_greedy(log_probs: np.ndarray,
     # Convert token IDs to text using the vocabulary
     transcription = "".join(vocab[tok] for tok in decoded_ids)
     print(f"Decoded transcription (Greedy): {transcription}")
-    print(f"Log probability (Greedy): {total_log_prob:.7f}")
+    print(f"Log probability (Greedy): {total_log_prob:.15f}")
 
     # Compute metrics if ground truth is provided
     metrics = {}
     if ground_truth:
         metrics = return_metrics(transcription=transcription,
                                  ground_truth=ground_truth,
-                                 metrics=metrics)
+                                 metrics=metrics,
+                                 total_log_prob=total_log_prob,
+                                 flag="greedy")
     return transcription, metrics
 
 def decode_ctc_beam_search(
@@ -729,13 +864,17 @@ def decode_ctc_beam_search(
     best_log_prob = np.logaddexp(best_prob_blank, best_prob_non_blank)
     transcription = "".join(vocab[tok] for tok in best_seq)
     print(f"Transcription (Beam Search, beam_width={beam_width}, length_penalty={length_penalty}): {transcription}")
-    print(f"Log probability (Beam Search): {best_log_prob + 1:.7f}")
+    print(f"Log probability (Beam Search): {best_log_prob + 1:.14f}")
 
     # Compute metrics if ground truth is provided
     metrics = {}
     if ground_truth:
         metrics = return_metrics(transcription=transcription,
                                  ground_truth=ground_truth,
-                                 metrics=metrics)
+                                 metrics=metrics,
+                                 total_log_prob=best_log_prob + 1,
+                                 beam_width=beam_width,
+                                 length_penalty=length_penalty,
+                                 flag="beam")
 
     return transcription, metrics
