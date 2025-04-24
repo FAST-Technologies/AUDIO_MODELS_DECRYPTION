@@ -9,6 +9,7 @@ import onnxruntime as rt
 import hydra
 from IPython.display import Audio
 import librosa
+import soundfile as sf
 
 import torchaudio.functional as F
 import torchaudio.transforms as T
@@ -35,23 +36,16 @@ except Exception as e:
 from GigaAM_to_ONNX.LoadClass import load_model
 
 # Импорт модулей для проверки работы нейронной сети на PyTorch
-from CTC_v2_PyTorch.FeatureExtractor_PyTorch import FeatureExtractor_PyTorch
-from CTC_v2_PyTorch.HelpFunction_PyTorch import (load_audio_PyTorch,
-                                                 print_statistic_data_PyTorch,
-                                                 compute_lfcc_PyTorch)
-from CTC_v2_PyTorch.GraphicsModule_PyTorch import PyTorchGraphicsModule
+from CTC_v2_PyTorch.GigaamCtcASRPyTorch import GigaamCtcASRPyTorch
+from HelpFunction_PyTorch import (load_audio_PyTorch,
+                                  print_statistic_data_PyTorch,
+                                  compute_lfcc_PyTorch)
+from GraphicsModule_PyTorch import PyTorchGraphicsModule
 
 # Импорт модулей для проверки работы нейронной сети на NumPy
-from CTC_v2_NumPy.FeatureExtractor_NumPy import FeatureExtractor_V2_0
-from CTC_v2_NumPy.HelpFunction_NumPy import (load_audio_new_V2_0,
-                                             load_audio_prev,
-                                             print_statistic_data_V2_0,
-                                             compute_lfcc_V2_0)
-from CTC_v2_NumPy.GraphicsModule_NumPy import NumpyGraphicsModule
-
-from Decode_Module import (tensor_info,
-                           decode_ctc_greedy,
-                           decode_ctc_beam_search)
+from CTC_v2_NumPy.GigaamCtcASRNumPy import GigaamCtcASRNumPy
+from HelpFunction_NumPy import (load_audio_new_V2_0,
+                                load_audio_prev)
 
 from Constants import Constants, VOCAB
 MY_CONSTANTS = Constants()
@@ -94,54 +88,78 @@ if os.path.exists(model_path):
 else:
     print(f"Файл не найден: {model_path}, будет выполнен новый запрос")
 
-# Загрузка модели v2_ctc из GigaAM
 model = load_model(model_name=MY_CONSTANTS.MODEL_TYPE,
                    fp16_encoder=False,
                    device="cpu")
-
-# Экспорт в ONNX
-# В путь виртуального окружения
 model.to_onnx(dir_path=MY_CONSTANTS.DIRNAME)
 
 """## 🔦Пишем свою версию инференса на PyTorch"""
 
-# Загрузка ONNX-сессии
-sessionPyTorch = rt.InferenceSession(f"{MY_CONSTANTS.DIRNAME}/{MY_CONSTANTS.MODEL_NAME}",
-                                     providers=["CPUExecutionProvider"])
+model_path = f"{MY_CONSTANTS.DIRNAME}/{MY_CONSTANTS.MODEL_NAME}"
+PyTorch_Inference = GigaamCtcASRPyTorch(model_path)
 
-# Проверка входов и выходов модели
-try:
-    tensor_info(flag="i",
-                tensors=sessionPyTorch.get_inputs())
-    tensor_info(flag="o",
-                tensors=sessionPyTorch.get_outputs())
-except Exception as e:
-    print(f"Ошибка в представлении тензорной информации модели: {e}")
+audioMONO, original_sample_rateMONO = sf.read(source_path, dtype='float32', always_2d=True)
+print("Размерность audioMONO (до преобразования):", audioMONO.shape)
+# Преобразуем стерео в моно, усредняя каналы
+if audioMONO.shape[1] > 1:
+    print("Аудио СТЕРЕО -> МОНО (усреднение каналов)")
+    audioMONO = np.mean(audioMONO, axis=1)  # [samples, channels] -> [samples]
+print("Размерность audioMONO (после преобразования):", audioMONO.shape)
 
-# Подготовка входных данных
-audioMONO = load_audio_PyTorch(audio_path=source_path,
-                               load_type="mono")
-print("Размерность audioMONO:", audioMONO.shape)
+audioMONOOld = load_audio_PyTorch(audio_path=source_path,
+                                  load_type="mono")
+print("Размерность audioMONOOld:", audioMONOOld.shape)
 
-# Второй вариант замены функции для аудио
-audioSTEREO, original_sample_rate = torchaudio.load(source_path)
+audioSTEREO, original_sample_rateSTEREO = sf.read(source_path,
+                                                  dtype='float32',
+                                                  always_2d=True)
 
-# Продолжаем работать в стерео формате:
-if audioSTEREO.dim() == 1:  # Если моно
+# Загрузка с помощью torchaudio
+audioSTEREOTorch, original_sample_rateTorch = torchaudio.load(source_path)
+if audioSTEREOTorch.dim() == 1:
     print("Аудио МОНО, сконвертируем в СТЕРЕО формат, продублировав канал")
-    audioSTEREO = torch.stack([audioSTEREO, audioSTEREO])  # Дублируем канал для создания стерео
-elif audioSTEREO.dim() == 2:  # Если стерео
+    audioSTEREOTorch = torch.stack([audioSTEREOTorch, audioSTEREOTorch])
+elif audioSTEREOTorch.dim() == 2:
     print("Аудио уже в СТЕРЕО формате")
-    pass # Ничего не делаем, аудио и так стерео
 else:
     raise ValueError("Неподдерживаемое количество каналов в аудио")
 
+# Resampling для audioSTEREO
+if original_sample_rateSTEREO != MY_CONSTANTS.SAMPLE_RATE:
+    print(f"Sample rate of the audio ({original_sample_rateSTEREO}) does not match expected ({MY_CONSTANTS.SAMPLE_RATE})")
+    audio_tensor = torch.from_numpy(audioSTEREO).float()
+    audio_tensor = audio_tensor.transpose(0, 1)  # [samples, channels] -> [channels, samples]
+    audio_tensor = F.resample(audio_tensor, original_sample_rateSTEREO, MY_CONSTANTS.SAMPLE_RATE)
+    audioSTEREO = audio_tensor.transpose(0, 1).numpy()  # [channels, samples] -> [samples, channels]
+print("Полученная размерность audioSTEREO:", audioSTEREO.shape)
+print(f"Диапазон значений итогового аудио (audioSTEREO): [{audioSTEREO.min()} ; {audioSTEREO.max()}]")
+
+# Resampling для audioMONO
+if original_sample_rateMONO != MY_CONSTANTS.SAMPLE_RATE:
+    print(f"Sample rate of the audio ({original_sample_rateMONO}) does not match expected ({MY_CONSTANTS.SAMPLE_RATE})")
+    audio_tensorMONO = torch.from_numpy(audioMONO).float()  # [samples]
+    # Добавляем размерность канала: [samples] -> [1, samples]
+    audio_tensorMONO = audio_tensorMONO.unsqueeze(0)
+    audio_tensorMONO = F.resample(audio_tensorMONO, original_sample_rateMONO, MY_CONSTANTS.SAMPLE_RATE)
+    # Убираем размерность канала: [1, samples] -> [samples]
+    audioMONO = audio_tensorMONO.squeeze(0).numpy()
+audioMONO = audioMONO / MY_CONSTANTS.FLOAT_DIVISOR
+print("Полученная размерность audioMONO:", audioMONO.shape)
+print(f"Диапазон значений итогового аудио (audioMONO): [{audioMONO.min()} ; {audioMONO.max()}]")
+
+# Resampling для audioSTEREOTorch
+if original_sample_rateTorch != MY_CONSTANTS.SAMPLE_RATE:
+    audioSTEREOTorch = F.resample(audioSTEREOTorch, original_sample_rateTorch, MY_CONSTANTS.SAMPLE_RATE)
+audioSTEREOTorch = audioSTEREOTorch / MY_CONSTANTS.FLOAT_DIVISOR
+print("Полученная размерность audioSTEREOTorch:", audioSTEREOTorch.shape)
+print(f"Диапазон значений итогового аудио (audioSTEREOTorch): [{audioSTEREOTorch.min()} ; {audioSTEREOTorch.max()}]")
+
 spectrogram = T.Spectrogram(n_fft=n_fft_test)
 griffin_lim = T.GriffinLim(n_fft=n_fft_test)
-spec = spectrogram(audioMONO)
+audioMONO_tensor = torch.from_numpy(audioMONO).float()  # [samples]
+audioMONO_tensor = audioMONO_tensor.unsqueeze(0)  # [1, samples]
+spec = spectrogram(audioMONO_tensor)
 reconstructed_waveform = griffin_lim(spec)
-
-# Строим Спектрограмму
 PyTorchGraphicsModule.plot_spectrogram_PyTorch(specgram=spec[0],
                                                title="Изначальная спектрограмма",
                                                xlabel="Индекс фрейма",
@@ -149,7 +167,6 @@ PyTorchGraphicsModule.plot_spectrogram_PyTorch(specgram=spec[0],
                                                colorbar_label="Цветовой градиент спектрограммы",
                                                grid_flag=False)
 
-# Строим WaveForm
 PyTorchGraphicsModule.plot_waveform_PyTorch(waveform=audioMONO,
                                             sr=MY_CONSTANTS.SAMPLE_RATE,
                                             title="Оригинальная волновая форма (WaveForm) (audioMONO_PyTorch)",
@@ -157,15 +174,13 @@ PyTorchGraphicsModule.plot_waveform_PyTorch(waveform=audioMONO,
                                             ylabel="Амплитуда",
                                             flag="CW",
                                             grid_flag=False)
-
-PyTorchGraphicsModule.plot_waveform_PyTorch(waveform=audioSTEREO,
+PyTorchGraphicsModule.plot_waveform_PyTorch(waveform=audioSTEREOTorch,
                                             sr=MY_CONSTANTS.SAMPLE_RATE,
                                             title="Оригинальная волновая форма (WaveForm) (audioSTEREO_PyTorch)",
                                             xlabel="Время (секунды) [s]",
                                             ylabel="Амплитуда",
                                             flag="CW",
                                             grid_flag=False)
-
 PyTorchGraphicsModule.plot_waveform_PyTorch(waveform=reconstructed_waveform,
                                             sr=MY_CONSTANTS.SAMPLE_RATE,
                                             title="Реконструированная волновая форма (WaveForm) (reconstructed_waveform)",
@@ -174,14 +189,13 @@ PyTorchGraphicsModule.plot_waveform_PyTorch(waveform=reconstructed_waveform,
                                             flag="RW",
                                             grid_flag=False)
 print("Выводим информацию по AUDIO: ")
-Audio(audioMONO.numpy(),
-      rate=MY_CONSTANTS.SAMPLE_RATE)
-Audio(audioSTEREO.numpy(),
+# Audio(audioMONO.numpy(),
+#       rate=MY_CONSTANTS.SAMPLE_RATE)
+Audio(audioSTEREOTorch.numpy(),
       rate=MY_CONSTANTS.SAMPLE_RATE)
 Audio(source_path,
       rate=MY_CONSTANTS.SAMPLE_RATE)
 
-# Вынести в отдельную функцию расчёта MFCC (PyTorch)
 mfcc_transform = T.MFCC(
     sample_rate=MY_CONSTANTS.SAMPLE_RATE,
     n_mfcc=n_mfcc_test,
@@ -192,7 +206,7 @@ mfcc_transform = T.MFCC(
         "mel_scale": "htk",
     },
 )
-mfcc = mfcc_transform(audioMONO)
+mfcc = mfcc_transform(audioMONO_tensor)
 PyTorchGraphicsModule.plot_spectrogram_PyTorch(specgram=mfcc[0],
                                                title="MFCC (PyTorch)",
                                                xlabel="Индекс фрейма",
@@ -201,7 +215,6 @@ PyTorchGraphicsModule.plot_spectrogram_PyTorch(specgram=mfcc[0],
                                                type="MFCC",
                                                util_type="TorchAudio",
                                                grid_flag=False)
-# Вынести в отдельную функцию расчёта LFCC (PyTorch)
 lfcc_transform = T.LFCC(
     sample_rate=MY_CONSTANTS.SAMPLE_RATE,
     n_lfcc=n_lfcc_test,
@@ -211,7 +224,7 @@ lfcc_transform = T.LFCC(
         "win_length": win_length_test,
     },
 )
-lfcc = lfcc_transform(audioMONO)
+lfcc = lfcc_transform(audioMONO_tensor)
 PyTorchGraphicsModule.plot_spectrogram_PyTorch(specgram=lfcc[0],
                                                title="LFCC (PyTorch)",
                                                xlabel="Индекс фрейма",
@@ -223,7 +236,7 @@ PyTorchGraphicsModule.plot_spectrogram_PyTorch(specgram=lfcc[0],
 
 # Вынести в отдельную функцию расчёта MFCC (Librosa)
 melspec = librosa.feature.melspectrogram(
-    y=audioMONO.numpy().squeeze(),
+    y=audioMONO_tensor.numpy().squeeze(),
     sr=MY_CONSTANTS.SAMPLE_RATE,
     n_fft=n_fft_test,
     win_length=win_length_test,
@@ -255,7 +268,7 @@ print(f"MSE между PyTorch и Librosa MFCC: {mse_mfcc}")
 
 # Вынести в отдельную функцию расчёта LFCC (Librosa)
 lfcc_librosa = compute_lfcc_PyTorch(
-    y=audioMONO.numpy().squeeze(),
+    y=audioMONO_tensor.numpy().squeeze(),
     sr=MY_CONSTANTS.SAMPLE_RATE,
     n_fft=n_fft_test,
     win_length=win_length_test,
@@ -277,24 +290,15 @@ PyTorchGraphicsModule.plot_spectrogram_PyTorch(specgram=lfcc_librosa,
 mse_lfcc = torch.square(torch.from_numpy(lfcc_librosa) - lfcc).mean().item()
 print(f"MSE между PyTorch и Librosa LFCC: {mse_lfcc}")
 
-pitch_PyTorch = F.detect_pitch_frequency(audioMONO, MY_CONSTANTS.SAMPLE_RATE)
+pitch_PyTorch = F.detect_pitch_frequency(audioMONO_tensor, MY_CONSTANTS.SAMPLE_RATE)
 print(f"Pitch: {pitch_PyTorch}")
-PyTorchGraphicsModule.plot_pitch_PyTorch(waveform=audioMONO,
+PyTorchGraphicsModule.plot_pitch_PyTorch(waveform=audioMONO_tensor,
                                          sr=MY_CONSTANTS.SAMPLE_RATE,
                                          pitch=pitch_PyTorch,
                                          title="График Питча",
                                          language_type="RU",
                                          grid_flag=False)
 
-if original_sample_rate != MY_CONSTANTS.SAMPLE_RATE:
-        audioSTEREO = F.resample(
-            audioSTEREO,
-            original_sample_rate,
-            MY_CONSTANTS.SAMPLE_RATE
-)
-audioSTEREO = audioSTEREO / MY_CONSTANTS.FLOAT_DIVISOR
-print("Полученная размерность audioSTEREO:", audioSTEREO.shape)
-print(f"Диапазон значений итогового аудио (audioSTEREO): [{audioSTEREO.min()} ; {audioSTEREO.max()}]")
 
 audioONNX = load_audio_prev(source_path)
 print(f"Размерность аудио (audioONNX): {audioONNX.shape}")
@@ -305,19 +309,19 @@ print(f"Размерность аудио (audioONNX после конверта
 
 audioONNX_stereo = torch.stack([audioONNX_tensor[0], audioONNX_tensor[0]])
 
-if audioONNX_tensor.shape[1] != audioMONO.shape[1]:
-    raise ValueError(f"Длина аудио не совпадает: {audioONNX_tensor.shape[1]} != {audioMONO.shape[1]}")
+if audioONNX_tensor.shape[1] != audioMONO_tensor.shape[1]:
+    raise ValueError(f"Длина аудио не совпадает: {audioONNX_tensor.shape[1]} != {audioMONO_tensor.shape[1]}")
 
 # Сравнение
-print(f"Максимальное расхождение для первого примера (моно): {torch.max(torch.abs(audioONNX_tensor - audioMONO)).item()} единицы")
-print(f"Максимальное расхождение для второго примера (стерео): {torch.max(torch.abs(audioONNX_stereo - audioSTEREO)).item()} единицы")
+print(f"Максимальное расхождение для первого примера (моно): {torch.max(torch.abs(audioONNX_tensor - audioMONO_tensor)).item()} единицы")
+print(f"Максимальное расхождение для второго примера (стерео): {torch.max(torch.abs(audioONNX_stereo - audioSTEREOTorch)).item()} единицы")
 
-mse_mono = torch.mean(torch.square(audioONNX_tensor - audioMONO)).item()
-mse_stereo = torch.mean(torch.square(audioONNX_stereo - audioSTEREO)).item()
+mse_mono = torch.mean(torch.square(audioONNX_tensor - audioMONO_tensor)).item()
+mse_stereo = torch.mean(torch.square(audioONNX_stereo - audioSTEREOTorch)).item()
 print(f"MSE между audioONNX_MONO и audioMONO (PyTorch): {mse_mono}")
 print(f"MSE между audioONNX_STEREO и audioSTEREO (PyTorch): {mse_stereo}")
 
-diff = audioONNX_tensor - audioMONO
+diff = audioONNX_tensor - audioMONO_tensor
 PyTorchGraphicsModule.plot_waveform_PyTorch(waveform=diff,
                                             sr=MY_CONSTANTS.SAMPLE_RATE,
                                             title="Разница между audioONNX и audioMONO",
@@ -326,10 +330,7 @@ PyTorchGraphicsModule.plot_waveform_PyTorch(waveform=diff,
                                             flag="CW",
                                             grid_flag=False)
 
-# Получаем результаты для моно и стерео канала
-preprocessorPyTorch = FeatureExtractor_PyTorch(sample_rate=MY_CONSTANTS.SAMPLE_RATE,
-                                               features=MY_CONSTANTS.FEAT_IN)
-mel_filters_PyTorch = preprocessorPyTorch.mel_fb
+mel_filters_PyTorch = PyTorch_Inference.mel_fb
 print(f"Тип: {type(mel_filters_PyTorch)}")
 
 PyTorchGraphicsModule.plot_fbank_PyTorch(mel_filters=mel_filters_PyTorch,
@@ -341,107 +342,62 @@ PyTorchGraphicsModule.plot_fbank_PyTorch(mel_filters=mel_filters_PyTorch,
                                          interpolation="bicubic",
                                          grid_flag=False)
 
-featuresPyMONO, lengthsPyMONO = preprocessorPyTorch(audioMONO.unsqueeze(0),
-                                                    torch.tensor([audioMONO.shape[-1]]))
+featuresPyMONO, lengthsPyMONO = PyTorch_Inference(audioMONO_tensor.unsqueeze(0),
+                                                    torch.tensor([audioMONO_tensor.shape[-1]]))
 featuresPyMONO = featuresPyMONO.detach().cpu().numpy().astype(np.float32)
 lengthsPyMONO = lengthsPyMONO.detach().cpu().numpy().astype(np.int64)
 
-featuresPySTEREO, lengthsPySTEREO = preprocessorPyTorch(audioSTEREO.unsqueeze(0),
-                                                        torch.tensor([audioSTEREO.shape[-1]]))
+featuresPySTEREO, lengthsPySTEREO = PyTorch_Inference(audioSTEREOTorch.unsqueeze(0),
+                                                        torch.tensor([audioSTEREOTorch.shape[-1]]))
 featuresPySTEREO = featuresPySTEREO.detach().cpu().numpy().astype(np.float32)
 lengthsPySTEREO = lengthsPySTEREO.detach().cpu().numpy().astype(np.int64)
 
-# Предоставляем статистические результаты по каждому из каналов
+# # Предоставляем статистические результаты по каждому из каналов
 print("Результаты для МОНО канала: ")
 print_statistic_data_PyTorch(features=featuresPyMONO)
 
 print("Результаты для СТЕРЕО канала: ")
 print_statistic_data_PyTorch(features=featuresPySTEREO)
+#
+# # Отображение первой фичи в батче (если features.shape = [1, 64, T])
+# # График для моно-канала
+# PyTorchGraphicsModule.mono_graph_PyTorch(features=featuresPyMONO,
+#                                          title='Спектрограмма фич (МОНО)',
+#                                          xlabel='Временные кадры',
+#                                          ylabel='Фичи',
+#                                          colorbar_label='Значение фичи',
+#                                          grid_flag=False)
 
-# Отображение первой фичи в батче (если features.shape = [1, 64, T])
-# График для моно-канала
-PyTorchGraphicsModule.mono_graph_PyTorch(features=featuresPyMONO,
-                                         title='Спектрограмма фич (МОНО)',
-                                         xlabel='Временные кадры',
-                                         ylabel='Фичи',
-                                         colorbar_label='Значение фичи',
-                                         grid_flag=False)
+# # Первый график для стерео-канала (с использованием Subplots)
+# PyTorchGraphicsModule.stereo_subplots_graph_PyTorch(features=featuresPySTEREO,
+#                                                      suptitle='Спектрограмма фич (СТЕРЕО/Subplots)',
+#                                                      colorbar_label='Значение фичи',
+#                                                      language_type="RU",
+#                                                      grid_flag=False)
+#
+# # Второй график для стерео-канала (с использованием GridSpec)
+# PyTorchGraphicsModule.stereo_gridspec_graph_PyTorch(features=featuresPySTEREO,
+#                                                     suptitle='Спектрограмма фич (СТЕРЕО/GridSpec)',
+#                                                     colorbar_label='Значение фичи',
+#                                                     language_type="RU",
+#                                                     grid_flag=False)
 
-# Первый график для стерео-канала (с использованием Subplots)
-PyTorchGraphicsModule.stereo_subplots_graph_PyTorch(features=featuresPySTEREO,
-                                                     suptitle='Спектрограмма фич (СТЕРЕО/Subplots)',
-                                                     colorbar_label='Значение фичи',
-                                                     language_type="RU",
-                                                     grid_flag=False)
-
-# Второй график для стерео-канала (с использованием GridSpec)
-PyTorchGraphicsModule.stereo_gridspec_graph_PyTorch(features=featuresPySTEREO,
-                                                    suptitle='Спектрограмма фич (СТЕРЕО/GridSpec)',
-                                                    colorbar_label='Значение фичи',
-                                                    language_type="RU",
-                                                    grid_flag=False)
-
-# Инференс для PyTorch реализации
-features_for_onnx = featuresPyMONO.squeeze(1)  # (1, 1, 64, T) -> (1, 64, T)
-inputs = {"features": features_for_onnx, "feature_lengths": lengthsPyMONO}
-log_probs_PyMONO = sessionPyTorch.run(["log_probs"], inputs)[0]
-
-# Декодирование (жадное) для PyTorch реализации
-transcription_PyMONO, metrics_PyMONO = decode_ctc_greedy(
-    log_probs=log_probs_PyMONO,
-    vocab=VOCAB,
-    blank_idx=MY_CONSTANTS.BLANK_IDX,
-    max_vocab_idx=max_vocab_idx,
-    ground_truth=ground_truth,
-)
-print("Транскрипция декодирования по лучу (PyTorch):", transcription_PyMONO)
-
-# Проверка типа и формы log_probs_PyMONO
-print("Тип значений log_probs_PyMONO:", type(log_probs_PyMONO))
-print("Размерность значений log_probs_PyMONO:", log_probs_PyMONO.shape if isinstance(log_probs_PyMONO, np.ndarray) else "Не является numpy массивом")
-
-# Проверка на nan и inf
-if np.any(np.isnan(log_probs_PyMONO)):
-    raise ValueError("log_probs_PyMONO содержит NaN значения")
-if np.any(np.isinf(log_probs_PyMONO)):
-    raise ValueError("log_probs_PyMONO содержит Inf значения")
-
-# Убедимся, что log_probs_PyMONO имеет форму [batch_size, seq_len, num_classes]
-if len(log_probs_PyMONO.shape) == 2:  # [seq_len, num_classes]
-    log_probs_PyMONO = log_probs_PyMONO[np.newaxis, :]  # [1, seq_len, num_classes]
-elif len(log_probs_PyMONO.shape) != 3:
-    raise ValueError(f"Неожиданный размер для log_probs_PyMONO: {log_probs_PyMONO.shape}")
-
-# Декодирование по лучу для PyTorch реализации на тестовых данных
+transcriptionGD = PyTorch_Inference.recognize(audioSTEREO,
+                                              decode_flag="GD",
+                                              ground_truth=ground_truth)
+global transcriptionBS
 for beam_width in beam_widths:
     for lp in length_penalties:
-        transcription, metric_result = decode_ctc_beam_search(
-            log_probs=log_probs_PyMONO,
-            vocab=VOCAB,
-            blank_idx=MY_CONSTANTS.BLANK_IDX,
-            max_vocab_idx=max_vocab_idx,
-            beam_width=beam_width,
-            length_penalty=lp,
-            ground_truth=ground_truth,
-        )
         print(f"\nTesting beam_width={beam_width}, length_penalty={lp}")
         time.sleep(5)
+        transcriptionBS = PyTorch_Inference.recognize(audioSTEREO,
+                                                      decode_flag="BS",
+                                                      beam_width=beam_width,
+                                                      length_penalty=lp,
+                                                      ground_truth=ground_truth)
 
-# Декодирование по лучу для PyTorch реализации
-transcription_PyMONO2, metrics_PyMONO2 = decode_ctc_beam_search(
-    log_probs=log_probs_PyMONO,
-    vocab=VOCAB,
-    blank_idx=MY_CONSTANTS.BLANK_IDX,
-    max_vocab_idx=max_vocab_idx,
-    beam_width=10,
-    length_penalty=0.7,
-    ground_truth=ground_truth,
-)
-print("Транскрипция декодирования по лучу (PyTorch):", transcription_PyMONO2)
-
-# А проверим-ка нашу аудио запись...
-Audio(source_path,
-      rate=MY_CONSTANTS.SAMPLE_RATE)
+print("Транскрипция жадного декодирования (PyTorch):", transcriptionGD)
+# print("Транскрипция декодирования по лучу (PyTorch):", transcriptionBS)
 
 """![link](https://drive.google.com/drive/MyDrive/n_fft.png)"""
 
@@ -449,39 +405,27 @@ Audio(source_path,
 
 """## 🔢 Переписываем текущую нейронную сеть с PyTorch на NumPy"""
 
-# Загрузка ONNX-сессии для NumPy
-session_NumPy = rt.InferenceSession(f"{MY_CONSTANTS.DIRNAME}/{MY_CONSTANTS.MODEL_NAME}",
-                                    providers=["CPUExecutionProvider"])
-
-# Проверка входов и выходов модели (вывод информации о тензорах)
-try:
-    tensor_info(flag="i",
-                tensors=session_NumPy.get_inputs())
-    tensor_info(flag="o",
-                tensors=session_NumPy.get_outputs())
-except Exception as e:
-    print(f"Error retrieving model tensor information: {e}")
 
 # Загрузка предыдущей записи
 audio_prev = load_audio_prev(source_path)
 print(f"Размерность аудио (audio_prev): {audio_prev.shape}")
-audio_prev = audio_prev[np.newaxis, :]  # [225963] -> [1, 225963]
+# audio_prev = audio_prev[np.newaxis, :]  # [225963] -> [1, 225963]
 audio_prev = audio_prev.astype(np.float32)
 
 # Подготовка входных данных - загрузка Моно записи
 audio_NumPy_MONO = load_audio_new_V2_0(audio_path=source_path,
                                        load_type="mono")
 print("Размерность аудио (audio_NumPy_MONO):", audio_NumPy_MONO.shape)
+audio_NumPy_MONO = audio_NumPy_MONO.astype(np.float32)
 
-preprocessor_NumPy = FeatureExtractor_V2_0(sample_rate=MY_CONSTANTS.SAMPLE_RATE,
-                                           features=MY_CONSTANTS.FEAT_IN)
+preprocessor_NumPy = GigaamCtcASRNumPy(model_path)
 
-audio_with_batch = audio_prev[np.newaxis, :]
-length_prev = np.array([audio_prev.shape[-1]],
-                       dtype=np.int64)
-featuresPrev, lengthsPrev = preprocessor_NumPy(audio_with_batch, length_prev)
-featuresPrev = featuresPrev.astype(np.float32)
-lengthsPrev = lengthsPrev.astype(np.int64)
+# audio_with_batch = audio_prev[np.newaxis, :]
+# length_prev = np.array([audio_prev.shape[-1]],
+#                        dtype=np.int64)
+# featuresPrev, lengthsPrev = preprocessor_NumPy(audio_with_batch, length_prev)
+# featuresPrev = featuresPrev.astype(np.float32)
+# lengthsPrev = lengthsPrev.astype(np.int64)
 
 # Подготовка входных данных - загрузка Стерео записи
 audio_NumPy_STEREO = load_audio_new_V2_0(audio_path=source_path,
@@ -494,201 +438,226 @@ print(f"Диапазон значений итогового аудио: [{audio
 # print(f"Максимальное расхождение для второго примера (стерео): {np.max(np.abs(audio_prev - audio_NumPy_STEREO))} единиц")
 
 # Получаем результаты для моно и стерео канала
-spectrogram_NumPy = T.Spectrogram(n_fft=n_fft_test)
-griffin_lim_NumPy = T.GriffinLim(n_fft=n_fft_test)
-spec_NumPy = spectrogram_NumPy(torch.from_numpy(audio_NumPy_MONO))  # Конверсия в PyTorch
-reconstructed_waveform_NumPy = griffin_lim_NumPy(spec_NumPy).numpy()  # Обратно в NumPy
+# spectrogram_NumPy = T.Spectrogram(n_fft=n_fft_test)
+# griffin_lim_NumPy = T.GriffinLim(n_fft=n_fft_test)
+# spec_NumPy = spectrogram_NumPy(torch.from_numpy(audio_NumPy_MONO))  # Конверсия в PyTorch
+# reconstructed_waveform_NumPy = griffin_lim_NumPy(spec_NumPy).numpy()  # Обратно в NumPy
+#
+# # Строим Спектрограмму
+# NumpyGraphicsModule.plot_spectrogram(specgram=spec_NumPy[0].numpy(),
+#                                      title="Изначальная спектрограмма",
+#                                      xlabel="Индекс фрейма",
+#                                      ylabel="Частотный диапазон",
+#                                      colorbar_label="Цветовой градиент спектрограммы",
+#                                      grid_flag=False)
+# # Строим WaveForm
+# NumpyGraphicsModule.plot_waveform(waveform=audio_NumPy_MONO,
+#                                  sr=MY_CONSTANTS.SAMPLE_RATE,
+#                                  title="Оригинальная волновая форма (WaveForm) (audioMONO_NumPy)",
+#                                  xlabel="Время (секунды) [s]",
+#                                  ylabel="Амплитуда",
+#                                  flag="CW",
+#                                  grid_flag=False)
+#
+# NumpyGraphicsModule.plot_waveform(waveform=audio_NumPy_STEREO,
+#                                   sr=MY_CONSTANTS.SAMPLE_RATE,
+#                                   title="Оригинальная волновая форма (WaveForm) (audioSTEREO_NumPy)",
+#                                   xlabel="Время (секунды) [s]",
+#                                   ylabel="Амплитуда",
+#                                   flag="CW",
+#                                   grid_flag=False)
+#
+# NumpyGraphicsModule.plot_waveform(waveform=reconstructed_waveform_NumPy,
+#                                   sr=MY_CONSTANTS.SAMPLE_RATE,
+#                                  title="Реконструированная волновая форма (WaveForm) (reconstructed_waveform_NumPy)",
+#                                  xlabel="Время (секунды) [s]",
+#                                  ylabel="Амплитуда",
+#                                  flag="RW",
+#                                  grid_flag=False)
+#
+# # MFCC и LFCC с Librosa
+# melspec = librosa.feature.melspectrogram(
+#     y=audio_NumPy_MONO[0],  # Берем первый канал
+#     sr=MY_CONSTANTS.SAMPLE_RATE,
+#     n_fft=n_fft_test,
+#     win_length=win_length_test,
+#     hop_length=hop_length_test,
+#     n_mels=n_mels_test,
+#     htk=True,
+#     fmin=0.0,
+#     fmax=MY_CONSTANTS.SAMPLE_RATE / 2.0,
+#     norm=None
+# )
+# mfcc_librosa = librosa.feature.mfcc(
+#     S=librosa.core.spectrum.power_to_db(melspec),
+#     n_mfcc=n_mfcc_test,
+#     dct_type=2,
+#     norm="ortho",
+# )
+# NumpyGraphicsModule.plot_spectrogram(specgram=mfcc_librosa,
+#                                      title="MFCC (Librosa)",
+#                                      xlabel="Индекс фрейма",
+#                                      ylabel="Частотный диапазон",
+#                                      colorbar_label="Цветовой градиент спектрограммы",
+#                                      type="MFCC",
+#                                      util_type="Librosa",
+#                                      grid_flag=False)
+#
+# lfcc_librosa = compute_lfcc_V2_0(
+#     y=audio_NumPy_MONO[0],
+#     sr=MY_CONSTANTS.SAMPLE_RATE,
+#     n_fft=n_fft_test,
+#     win_length=win_length_test,
+#     hop_length=hop_length_test,
+#     n_filters=n_lfcc_test,
+#     n_lfcc=n_lfcc_test,
+#     fmin=0.0,
+#     fmax=MY_CONSTANTS.SAMPLE_RATE / 2.0
+# )
+# NumpyGraphicsModule.plot_spectrogram(specgram=lfcc_librosa,
+#                                      title="LFCC (Librosa)",
+#                                      xlabel="Индекс фрейма",
+#                                      ylabel="Частотный диапазон",
+#                                      colorbar_label="Цветовой градиент спектрограммы",
+#                                      type="LFCC",
+#                                      util_type="Librosa",
+#                                      grid_flag=False)
 
-# Строим Спектрограмму
-NumpyGraphicsModule.plot_spectrogram(specgram=spec_NumPy[0].numpy(),
-                                     title="Изначальная спектрограмма",
-                                     xlabel="Индекс фрейма",
-                                     ylabel="Частотный диапазон",
-                                     colorbar_label="Цветовой градиент спектрограммы",
-                                     grid_flag=False)
-# Строим WaveForm
-NumpyGraphicsModule.plot_waveform(waveform=audio_NumPy_MONO,
-                                 sr=MY_CONSTANTS.SAMPLE_RATE,
-                                 title="Оригинальная волновая форма (WaveForm) (audioMONO_NumPy)",
-                                 xlabel="Время (секунды) [s]",
-                                 ylabel="Амплитуда",
-                                 flag="CW",
-                                 grid_flag=False)
+# pitch_numpy = F.detect_pitch_frequency(torch.from_numpy(audio_NumPy_MONO), MY_CONSTANTS.SAMPLE_RATE).numpy()
+# NumpyGraphicsModule.plot_pitch(waveform=audio_NumPy_MONO,
+#                                sr=MY_CONSTANTS.SAMPLE_RATE,
+#                                pitch=pitch_numpy,
+#                                title="График Питча",
+#                                language_type="RU",
+#                                grid_flag=False)
 
-NumpyGraphicsModule.plot_waveform(waveform=audio_NumPy_STEREO,
-                                  sr=MY_CONSTANTS.SAMPLE_RATE,
-                                  title="Оригинальная волновая форма (WaveForm) (audioSTEREO_NumPy)",
-                                  xlabel="Время (секунды) [s]",
-                                  ylabel="Амплитуда",
-                                  flag="CW",
-                                  grid_flag=False)
+# mel_filters_NumPy = preprocessor_NumPy.mel_fb
+# print(f"Тип: {type(mel_filters_NumPy)}")
+# NumpyGraphicsModule.plot_fbank(mel_filters=mel_filters_NumPy,
+#                                title="Mel Filter Bank - NumPy (Финальный Результат)",
+#                                xlabel = "Частота (Hz)",
+#                                ylabel = "Индекс Mel Фильтра",
+#                                colorbar_label = "Веса фильтра (цветовой градиент)",
+#                                cmap='viridis',
+#                                interpolation="bicubic",
+#                                grid_flag=False)
 
-NumpyGraphicsModule.plot_waveform(waveform=reconstructed_waveform_NumPy,
-                                  sr=MY_CONSTANTS.SAMPLE_RATE,
-                                 title="Реконструированная волновая форма (WaveForm) (reconstructed_waveform_NumPy)",
-                                 xlabel="Время (секунды) [s]",
-                                 ylabel="Амплитуда",
-                                 flag="RW",
-                                 grid_flag=False)
-
-# MFCC и LFCC с Librosa
-melspec = librosa.feature.melspectrogram(
-    y=audio_NumPy_MONO[0],  # Берем первый канал
-    sr=MY_CONSTANTS.SAMPLE_RATE,
-    n_fft=n_fft_test,
-    win_length=win_length_test,
-    hop_length=hop_length_test,
-    n_mels=n_mels_test,
-    htk=True,
-    fmin=0.0,
-    fmax=MY_CONSTANTS.SAMPLE_RATE / 2.0,
-    norm=None
-)
-mfcc_librosa = librosa.feature.mfcc(
-    S=librosa.core.spectrum.power_to_db(melspec),
-    n_mfcc=n_mfcc_test,
-    dct_type=2,
-    norm="ortho",
-)
-NumpyGraphicsModule.plot_spectrogram(specgram=mfcc_librosa,
-                                     title="MFCC (Librosa)",
-                                     xlabel="Индекс фрейма",
-                                     ylabel="Частотный диапазон",
-                                     colorbar_label="Цветовой градиент спектрограммы",
-                                     type="MFCC",
-                                     util_type="Librosa",
-                                     grid_flag=False)
-
-lfcc_librosa = compute_lfcc_V2_0(
-    y=audio_NumPy_MONO[0],
-    sr=MY_CONSTANTS.SAMPLE_RATE,
-    n_fft=n_fft_test,
-    win_length=win_length_test,
-    hop_length=hop_length_test,
-    n_filters=n_lfcc_test,
-    n_lfcc=n_lfcc_test,
-    fmin=0.0,
-    fmax=MY_CONSTANTS.SAMPLE_RATE / 2.0
-)
-NumpyGraphicsModule.plot_spectrogram(specgram=lfcc_librosa,
-                                     title="LFCC (Librosa)",
-                                     xlabel="Индекс фрейма",
-                                     ylabel="Частотный диапазон",
-                                     colorbar_label="Цветовой градиент спектрограммы",
-                                     type="LFCC",
-                                     util_type="Librosa",
-                                     grid_flag=False)
-
-pitch_numpy = F.detect_pitch_frequency(torch.from_numpy(audio_NumPy_MONO), MY_CONSTANTS.SAMPLE_RATE).numpy()
-NumpyGraphicsModule.plot_pitch(waveform=audio_NumPy_MONO,
-                               sr=MY_CONSTANTS.SAMPLE_RATE,
-                               pitch=pitch_numpy,
-                               title="График Питча",
-                               language_type="RU",
-                               grid_flag=False)
-
-mel_filters_NumPy = preprocessor_NumPy.mel_fb
-print(f"Тип: {type(mel_filters_NumPy)}")
-NumpyGraphicsModule.plot_fbank(mel_filters=mel_filters_NumPy,
-                               title="Mel Filter Bank - NumPy (Финальный Результат)",
-                               xlabel = "Частота (Hz)",
-                               ylabel = "Индекс Mel Фильтра",
-                               colorbar_label = "Веса фильтра (цветовой градиент)",
-                               cmap='viridis',
-                               interpolation="bicubic",
-                               grid_flag=False)
-
-# Получаем фичи и длину фич для Моно записи
-features_NumPy_MONO, lengths_NumPy_MONO = preprocessor_NumPy(audio_NumPy_MONO[np.newaxis, :],
-                                                             np.array([audio_NumPy_MONO.shape[-1]],
-                                                             dtype = np.int64))
-features_NumPy_MONO = features_NumPy_MONO.astype(np.float32)
-lengths_NumPy_MONO = lengths_NumPy_MONO.astype(np.int64)
-
-# Получаем фичи и длину фич для Стерео записи
-features_NumPy_STEREO, lengths_NumPy_STEREO = preprocessor_NumPy(audio_NumPy_STEREO[np.newaxis, :],
-                                                                 np.array([audio_NumPy_STEREO.shape[-1]],
-                                                                 dtype = np.int64))
-features_NumPy_STEREO = features_NumPy_STEREO.astype(np.float32)
-lengths_NumPy_STEREO = lengths_NumPy_STEREO.astype(np.int64)
-
-# Статистика (featuresPrev)
-print_statistic_data_V2_0(features=featuresPrev)
-
-# Статистика (features_NumPy_MONO)
-print_statistic_data_V2_0(features=features_NumPy_MONO)
-
-# Статистика (features_NumPy_STEREO)
-print_statistic_data_V2_0(features=features_NumPy_STEREO)
-
-# Предоставляем статистические результаты по каждому из каналов
-print("Результаты для МОНО канала (NumPy):")
-print_statistic_data_V2_0(features=features_NumPy_MONO)
-
-print("Результаты для СТЕРЕО канала (NumPy):")
-print_statistic_data_V2_0(features=features_NumPy_STEREO)
+# # Получаем фичи и длину фич для Моно записи
+# features_NumPy_MONO, lengths_NumPy_MONO = preprocessor_NumPy(audio_NumPy_MONO[np.newaxis, :],
+#                                                              np.array([audio_NumPy_MONO.shape[-1]],
+#                                                              dtype = np.int64))
+# features_NumPy_MONO = features_NumPy_MONO.astype(np.float32)
+# lengths_NumPy_MONO = lengths_NumPy_MONO.astype(np.int64)
+#
+# # Получаем фичи и длину фич для Стерео записи
+# features_NumPy_STEREO, lengths_NumPy_STEREO = preprocessor_NumPy(audio_NumPy_STEREO[np.newaxis, :],
+#                                                                  np.array([audio_NumPy_STEREO.shape[-1]],
+#                                                                  dtype = np.int64))
+# features_NumPy_STEREO = features_NumPy_STEREO.astype(np.float32)
+# lengths_NumPy_STEREO = lengths_NumPy_STEREO.astype(np.int64)
+#
+# # Статистика (featuresPrev)
+# print_statistic_data_V2_0(features=featuresPrev)
+#
+# # Статистика (features_NumPy_MONO)
+# print_statistic_data_V2_0(features=features_NumPy_MONO)
+#
+# # Статистика (features_NumPy_STEREO)
+# print_statistic_data_V2_0(features=features_NumPy_STEREO)
+#
+# # Предоставляем статистические результаты по каждому из каналов
+# print("Результаты для МОНО канала (NumPy):")
+# print_statistic_data_V2_0(features=features_NumPy_MONO)
+#
+# print("Результаты для СТЕРЕО канала (NumPy):")
+# print_statistic_data_V2_0(features=features_NumPy_STEREO)
 
 # Отображение первой фичи в батче (если features.shape = [1, 64, T])
 # График для моно-канала
-NumpyGraphicsModule.mono_graph_V2_0(features=features_NumPy_MONO,
-                                    title='Спектрограмма фич (МОНО)',
-                                    xlabel='Временные кадры',
-                                    ylabel='Фичи',
-                                    colorbar_label='Значение фичи',
-                                    grid_flag=False)
-
-# Первый график для стерео-канала (с использованием Subplots)
-NumpyGraphicsModule.stereo_subplots_graph_V2_0(features=features_NumPy_STEREO,
-                                                suptitle='Спектрограмма фич (СТЕРЕО/Subplots)',
-                                                colorbar_label='Значение фичи',
-                                                language_type="RU",
-                                                grid_flag=False)
-
-# Второй график для стерео-канала (с использованием GridSpec)
-NumpyGraphicsModule.stereo_gridspec_graph_V2_0(features=features_NumPy_STEREO,
-                                               suptitle='Спектрограмма фич (СТЕРЕО/GridSpec)',
-                                               colorbar_label='Значение фичи',
-                                               language_type="RU",
-                                               grid_flag=False)
+# NumpyGraphicsModule.mono_graph_V2_0(features=features_NumPy_MONO,
+#                                     title='Спектрограмма фич (МОНО)',
+#                                     xlabel='Временные кадры',
+#                                     ylabel='Фичи',
+#                                     colorbar_label='Значение фичи',
+#                                     grid_flag=False)
+#
+# # Первый график для стерео-канала (с использованием Subplots)
+# NumpyGraphicsModule.stereo_subplots_graph_V2_0(features=features_NumPy_STEREO,
+#                                                 suptitle='Спектрограмма фич (СТЕРЕО/Subplots)',
+#                                                 colorbar_label='Значение фичи',
+#                                                 language_type="RU",
+#                                                 grid_flag=False)
+#
+# # Второй график для стерео-канала (с использованием GridSpec)
+# NumpyGraphicsModule.stereo_gridspec_graph_V2_0(features=features_NumPy_STEREO,
+#                                                suptitle='Спектрограмма фич (СТЕРЕО/GridSpec)',
+#                                                colorbar_label='Значение фичи',
+#                                                language_type="RU",
+#                                                grid_flag=False)
 
 # Инференс NumPy
-inputs_NumPy_MONO = {"features": features_NumPy_MONO, "feature_lengths": lengths_NumPy_MONO}
-log_probs_NumPy_MONO = session_NumPy.run(["log_probs"], inputs_NumPy_MONO)[0]
-
-# Проверка на nan и inf
-if np.any(np.isnan(log_probs_NumPy_MONO)):
-    raise ValueError("log_probs_NumPy_MONO contains NaN values")
-if np.any(np.isinf(log_probs_NumPy_MONO)):
-    raise ValueError("log_probs_NumPy_MONO contains Inf values")
-
-# Убедимся, что log_probs_NumPy_MONO имеет форму [batch_size, seq_len, num_classes]
-if len(log_probs_NumPy_MONO.shape) == 2:  # [seq_len, num_classes]
-    log_probs_NumPy_MONO = log_probs_NumPy_MONO[np.newaxis, :]  # [1, seq_len, num_classes]
-elif len(log_probs_NumPy_MONO.shape) != 3:
-    raise ValueError(f"Unexpected shape for log_probs_NumPy_MONO: {log_probs_NumPy_MONO.shape}")
+# inputs_NumPy_MONO = {"features": features_NumPy_MONO, "feature_lengths": lengths_NumPy_MONO}
+# log_probs_NumPy_MONO = session_NumPy.run(["log_probs"], inputs_NumPy_MONO)[0]
+#
+# # Проверка на nan и inf
+# if np.any(np.isnan(log_probs_NumPy_MONO)):
+#     raise ValueError("log_probs_NumPy_MONO contains NaN values")
+# if np.any(np.isinf(log_probs_NumPy_MONO)):
+#     raise ValueError("log_probs_NumPy_MONO contains Inf values")
+#
+# # Убедимся, что log_probs_NumPy_MONO имеет форму [batch_size, seq_len, num_classes]
+# if len(log_probs_NumPy_MONO.shape) == 2:  # [seq_len, num_classes]
+#     log_probs_NumPy_MONO = log_probs_NumPy_MONO[np.newaxis, :]  # [1, seq_len, num_classes]
+# elif len(log_probs_NumPy_MONO.shape) != 3:
+#     raise ValueError(f"Unexpected shape for log_probs_NumPy_MONO: {log_probs_NumPy_MONO.shape}")
 
 # Декодирование (жадное) для NumPy реализации
-transcription_NumPy, metrics_NumPy = decode_ctc_greedy(
-    log_probs=log_probs_NumPy_MONO,
-    vocab=VOCAB,
-    blank_idx=MY_CONSTANTS.BLANK_IDX,
-    max_vocab_idx=max_vocab_idx,
-    ground_truth=ground_truth,
+audio_prev = audio_prev.astype(np.float32)
+print(f"Форма audio_prev перед передачей в recognize: {audio_prev.shape}")
+transcriptionGD_NumPy, metricsGD_NumPy = preprocessor_NumPy.recognize(
+    waveforms=audio_prev,
+    decode_flag="GD",
+    ground_truth=ground_truth
 )
 
-print("Транскрипция:", transcription_NumPy)
-
-# Декодирование по лучу для NumPy реализации
+transcriptionBS_NumPy, metricsBS_NumPy = None, None
 for beam_width in beam_widths:
     for lp in length_penalties:
-        transcription, metric_result = decode_ctc_beam_search(
-            log_probs=log_probs_NumPy_MONO,
-            vocab=VOCAB,
-            blank_idx=MY_CONSTANTS.BLANK_IDX,
-            max_vocab_idx=max_vocab_idx,
-            beam_width=beam_width,
-            length_penalty=lp,
-            ground_truth=ground_truth,
-        )
         print(f"\nTesting beam_width={beam_width}, length_penalty={lp}")
         time.sleep(5)
+        transcriptionBS_NumPy, metricsBS_NumPy = preprocessor_NumPy.recognize(
+            waveforms=audio_prev,
+            decode_flag="BS",
+            beam_width=beam_width,
+            length_penalty=lp,
+            ground_truth=ground_truth
+        )
+        print(f"Транскрипция (Beam Search, beam_width={beam_width}, length_penalty={lp}): {transcriptionBS_NumPy}")
+
+print("Транскрипция жадного декодирования (NumPy):", transcriptionGD_NumPy)
+print("Транскрипция декодирования по лучу (NumPy):", transcriptionBS_NumPy)
+# transcription_NumPy, metrics_NumPy = decode_ctc_greedy(
+#     log_probs=log_probs_NumPy_MONO,
+#     vocab=VOCAB,
+#     blank_idx=MY_CONSTANTS.BLANK_IDX,
+#     max_vocab_idx=max_vocab_idx,
+#     ground_truth=ground_truth,
+# )
+#
+# print("Транскрипция:", transcription_NumPy)
+#
+# # Декодирование по лучу для NumPy реализации
+# for beam_width in beam_widths:
+#     for lp in length_penalties:
+#         transcription, metric_result = decode_ctc_beam_search(
+#             log_probs=log_probs_NumPy_MONO,
+#             vocab=VOCAB,
+#             blank_idx=MY_CONSTANTS.BLANK_IDX,
+#             max_vocab_idx=max_vocab_idx,
+#             beam_width=beam_width,
+#             length_penalty=lp,
+#             ground_truth=ground_truth,
+#         )
+#         print(f"\nTesting beam_width={beam_width}, length_penalty={lp}")
+#         time.sleep(5)
+#         print("Транскрипция декодирования по лучу (NumPy):", transcription)
