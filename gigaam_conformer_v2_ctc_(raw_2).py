@@ -1,5 +1,7 @@
 # Импорт необходимых нам модулей и библиотек
 import os
+
+
 import numpy as np
 import torch
 import torchaudio
@@ -14,6 +16,8 @@ import soundfile as sf
 import torchaudio.functional as F
 import torchaudio.transforms as T
 
+from Nemo_FastConformer_Hybrid_RNNT_To_ONNX.LoadClass import export_nemo_to_onnx
+
 # Проверяем версии основных пакетов
 print("Torch version:", torch.__version__)
 print("Torchaudio version:", torchaudio.__version__)
@@ -22,6 +26,10 @@ print("Omegaconf version:", omegaconf.__version__)
 print("Numpy version:", np.__version__)
 print("Onnxruntime version:", rt.__version__)
 print("Librosa version:", librosa.__version__)
+
+import nemo
+import nemo.collections.asr as nemo_asr
+print(nemo.__version__)
 
 # Проверка совместимости NumPy и PyTorch
 # Проверяем версию NumPy (должна быть 1.26.4 - ниже второй)
@@ -72,11 +80,34 @@ ground_truth = "мне необходимо вам рассказать след
 if not os.path.exists(source_path):
     raise FileNotFoundError(f"Файл не найден по пути: {source_path}")
 
-## 📝Создаем ONNX файл
+## 📝Создаем ONNX файл (для модели GigaAM Conformer v2 CTC)
 # Получение модели из виртуальной среды
 # Default cache directory
-cache_dir = os.path.expanduser(MY_CONSTANTS.DOWNLOAD_CACHE)
-model_path = os.path.join(cache_dir, f"{MY_CONSTANTS.MODEL_TYPE}.ckpt")
+# cache_dir = os.path.expanduser(MY_CONSTANTS.DOWNLOAD_CACHE)
+# model_path = os.path.join(cache_dir, f"{MY_CONSTANTS.MODEL_TYPE}.ckpt")
+#
+# # Если файл не обнаружен - скачаем его
+# if os.path.exists(model_path):
+#     file_size = os.path.getsize(model_path)
+#     print(f"Файл найден: {model_path}, размер: {file_size} байт")
+#     if file_size == 0:
+#         print("Файл пустой, удаляем и попробуем скачать заново")
+#         os.remove(model_path)
+# else:
+#     print(f"Файл не найден: {model_path}, будет выполнен новый запрос")
+#
+# model = load_model(model_name=MY_CONSTANTS.MODEL_TYPE,
+#                    fp16_encoder=False,
+#                    device="cpu")
+# model.to_onnx(dir_path=MY_CONSTANTS.DIRNAME)
+
+## 📝Создаем ONNX файл (для модели Nemo FastConformer Hybrid RNNT)
+# Получение модели из виртуальной среды
+# Default cache directory
+cache_dir = os.path.expanduser(MY_CONSTANTS.DOWNLOAD_CACHE_NEMO)
+model_path = os.path.join(cache_dir, f"stt_ru_fastconformer_hybrid_large_pc.nemo")
+
+print("Got over here")
 
 # Если файл не обнаружен - скачаем его
 if os.path.exists(model_path):
@@ -88,10 +119,20 @@ if os.path.exists(model_path):
 else:
     print(f"Файл не найден: {model_path}, будет выполнен новый запрос")
 
-model = load_model(model_name=MY_CONSTANTS.MODEL_TYPE,
-                   fp16_encoder=False,
-                   device="cpu")
-model.to_onnx(dir_path=MY_CONSTANTS.DIRNAME)
+print("Trying")
+# model = load_model(model_name=MY_CONSTANTS.MODEL_TYPE_RNNT,
+#                    fp16_encoder=False,
+#                    device="cpu")
+# model.to_onnx(dir_path=MY_CONSTANTS.DIRNAME)
+
+export_nemo_to_onnx(
+        model_name="stt_ru_fastconformer_hybrid_large_pc",
+        onnx_dir="onnx_models",
+        device="cpu",
+        # decoder_type="ctc"  # Указываем RNNT
+        decoder_types=["ctc", "rnnt"]
+    )
+print("Hooray")
 
 """## 🔦Пишем свою версию инференса на PyTorch"""
 

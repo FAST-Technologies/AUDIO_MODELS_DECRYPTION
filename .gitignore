@@ -1,12 +1,15 @@
 # Игнорировать виртуальное окружение
 onnx_models/
+cache/
 
 # Игнорировать кэш Python
 CTC_v2_NumPy/__pycache__/
 CTC_v2_PyTorch/__pycache__/
 GigaAM_to_ONNX/__pycache__/
+Nemo_FastConformer_Hybrid_RNNT_To_ONNX/__pycache__/
 __pycache__/
 
 # Игнорировать временные файлы и бэкапы
 *.bak
 *.tmp
+*.nemo

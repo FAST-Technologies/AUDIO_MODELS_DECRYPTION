@@ -188,6 +188,7 @@ class GigaamCtcASRPyTorch(nn.Module):
         decoded_ids: List[int] = []
         total_log_prob = 0.0
         prev_tok = None
+        # prev_tok = BLANK_IDX
         for t, tok in enumerate(token_ids):
             total_log_prob += float(log_prob[t, tok])
             if tok > max_vocab_idx:

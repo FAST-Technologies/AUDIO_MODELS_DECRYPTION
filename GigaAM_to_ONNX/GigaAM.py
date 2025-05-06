@@ -1,4 +1,4 @@
-from typing import Tuple
+from typing import Tuple, Dict
 import torch
 import torch.nn as nn
 from torch import Tensor
@@ -243,3 +243,71 @@ class GigaAMASR(GigaAM):
                 },
             )
             self.forward = saved_forward
+        else:
+            super().to_onnx(dir_path)
+            onnx_converter(
+                model_name=f"{self.cfg.model_name}_decoder",
+                out_dir=dir_path,
+                module=self.head.decoder,
+            )
+            onnx_converter(
+                model_name=f"{self.cfg.model_name}_joint",
+                out_dir=dir_path,
+                module=self.head.joint,
+            )
+
+class GigaAMEmo(GigaAM):
+    """
+    Giga Acoustic Model for Emotion Recognition
+    """
+
+    def __init__(self, cfg: omegaconf.DictConfig):
+        super().__init__(cfg)
+        self.head = hydra.utils.instantiate(self.cfg.head)
+        self.id2name = cfg.id2name
+
+    def get_probs(self, wav_file: str) -> Dict[str, float]:
+        """
+        Calculate probabilities for each emotion class based on the provided audio file.
+        """
+        wav, length = self.prepare_wav(wav_file)
+        encoded, _ = self.forward(wav, length)
+        encoded_pooled = nn.functional.avg_pool1d(
+            encoded, kernel_size=encoded.shape[-1]
+        ).squeeze(-1)
+
+        logits = self.head(encoded_pooled)[0]
+        probs = nn.functional.softmax(logits, dim=-1).detach().tolist()
+
+        return {self.id2name[i]: probs[i] for i in range(len(self.id2name))}
+
+    def forward_for_export(self, features: Tensor, feature_lengths: Tensor) -> Tensor:
+        """
+        Encoder-decoder forward to save model entirely in onnx format.
+        """
+        encoded, _ = self.encoder(features, feature_lengths)
+        enc_pooled = nn.functional.avg_pool1d(
+            encoded, kernel_size=encoded.shape[-1].item()
+        ).squeeze(-1)
+        return nn.functional.softmax(self.head(enc_pooled)[0], dim=-1)
+
+    def to_onnx(self, dir_path: str = ".") -> None:
+        """
+        Export onnx Emo model.
+        """
+        saved_forward = self.forward
+        self.forward = self.forward_for_export
+        onnx_converter(
+            model_name=self.cfg.model_name,
+            out_dir=dir_path,
+            module=self,
+            inputs=self.encoder.input_example(),
+            input_names=["features", "feature_lengths"],
+            output_names=["probs"],
+            dynamic_axes={
+                "features": {0: "batch_size", 2: "seq_len"},
+                "feature_lengths": {0: "batch_size"},
+                "probs": {0: "batch_size", 1: "seq_len"},
+            },
+        )
+        self.forward = saved_forward
