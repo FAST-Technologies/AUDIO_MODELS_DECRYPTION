@@ -17,6 +17,8 @@ import torchaudio.functional as F
 import torchaudio.transforms as T
 
 from Nemo_FastConformer_Hybrid_RNNT_To_ONNX.LoadClass import export_nemo_to_onnx
+from RnntASPPyTorch_DIR.RnntASPPyTorch import RnntASRPyTorch
+from RnntASPNumpy_DIR.RnntASPNumpy import RnntASRNumPy
 
 # Проверяем версии основных пакетов
 print("Torch version:", torch.__version__)
@@ -201,34 +203,34 @@ audioMONO_tensor = torch.from_numpy(audioMONO).float()  # [samples]
 audioMONO_tensor = audioMONO_tensor.unsqueeze(0)  # [1, samples]
 spec = spectrogram(audioMONO_tensor)
 reconstructed_waveform = griffin_lim(spec)
-PyTorchGraphicsModule.plot_spectrogram_PyTorch(specgram=spec[0],
-                                               title="Изначальная спектрограмма",
-                                               xlabel="Индекс фрейма",
-                                               ylabel="Частотный диапазон",
-                                               colorbar_label="Цветовой градиент спектрограммы",
-                                               grid_flag=False)
-
-PyTorchGraphicsModule.plot_waveform_PyTorch(waveform=audioMONO,
-                                            sr=MY_CONSTANTS.SAMPLE_RATE,
-                                            title="Оригинальная волновая форма (WaveForm) (audioMONO_PyTorch)",
-                                            xlabel="Время (секунды) [s]",
-                                            ylabel="Амплитуда",
-                                            flag="CW",
-                                            grid_flag=False)
-PyTorchGraphicsModule.plot_waveform_PyTorch(waveform=audioSTEREOTorch,
-                                            sr=MY_CONSTANTS.SAMPLE_RATE,
-                                            title="Оригинальная волновая форма (WaveForm) (audioSTEREO_PyTorch)",
-                                            xlabel="Время (секунды) [s]",
-                                            ylabel="Амплитуда",
-                                            flag="CW",
-                                            grid_flag=False)
-PyTorchGraphicsModule.plot_waveform_PyTorch(waveform=reconstructed_waveform,
-                                            sr=MY_CONSTANTS.SAMPLE_RATE,
-                                            title="Реконструированная волновая форма (WaveForm) (reconstructed_waveform)",
-                                            xlabel="Время (секунды) [s]",
-                                            ylabel="Амплитуда",
-                                            flag="RW",
-                                            grid_flag=False)
+# PyTorchGraphicsModule.plot_spectrogram_PyTorch(specgram=spec[0],
+#                                                title="Изначальная спектрограмма",
+#                                                xlabel="Индекс фрейма",
+#                                                ylabel="Частотный диапазон",
+#                                                colorbar_label="Цветовой градиент спектрограммы",
+#                                                grid_flag=False)
+#
+# PyTorchGraphicsModule.plot_waveform_PyTorch(waveform=audioMONO,
+#                                             sr=MY_CONSTANTS.SAMPLE_RATE,
+#                                             title="Оригинальная волновая форма (WaveForm) (audioMONO_PyTorch)",
+#                                             xlabel="Время (секунды) [s]",
+#                                             ylabel="Амплитуда",
+#                                             flag="CW",
+#                                             grid_flag=False)
+# PyTorchGraphicsModule.plot_waveform_PyTorch(waveform=audioSTEREOTorch,
+#                                             sr=MY_CONSTANTS.SAMPLE_RATE,
+#                                             title="Оригинальная волновая форма (WaveForm) (audioSTEREO_PyTorch)",
+#                                             xlabel="Время (секунды) [s]",
+#                                             ylabel="Амплитуда",
+#                                             flag="CW",
+#                                             grid_flag=False)
+# PyTorchGraphicsModule.plot_waveform_PyTorch(waveform=reconstructed_waveform,
+#                                             sr=MY_CONSTANTS.SAMPLE_RATE,
+#                                             title="Реконструированная волновая форма (WaveForm) (reconstructed_waveform)",
+#                                             xlabel="Время (секунды) [s]",
+#                                             ylabel="Амплитуда",
+#                                             flag="RW",
+#                                             grid_flag=False)
 print("Выводим информацию по AUDIO: ")
 # Audio(audioMONO.numpy(),
 #       rate=MY_CONSTANTS.SAMPLE_RATE)
@@ -248,14 +250,14 @@ mfcc_transform = T.MFCC(
     },
 )
 mfcc = mfcc_transform(audioMONO_tensor)
-PyTorchGraphicsModule.plot_spectrogram_PyTorch(specgram=mfcc[0],
-                                               title="MFCC (PyTorch)",
-                                               xlabel="Индекс фрейма",
-                                               ylabel="Частотный диапазон",
-                                               colorbar_label="Цветовой градиент спектрограммы",
-                                               type="MFCC",
-                                               util_type="TorchAudio",
-                                               grid_flag=False)
+# PyTorchGraphicsModule.plot_spectrogram_PyTorch(specgram=mfcc[0],
+#                                                title="MFCC (PyTorch)",
+#                                                xlabel="Индекс фрейма",
+#                                                ylabel="Частотный диапазон",
+#                                                colorbar_label="Цветовой градиент спектрограммы",
+#                                                type="MFCC",
+#                                                util_type="TorchAudio",
+#                                                grid_flag=False)
 lfcc_transform = T.LFCC(
     sample_rate=MY_CONSTANTS.SAMPLE_RATE,
     n_lfcc=n_lfcc_test,
@@ -266,14 +268,14 @@ lfcc_transform = T.LFCC(
     },
 )
 lfcc = lfcc_transform(audioMONO_tensor)
-PyTorchGraphicsModule.plot_spectrogram_PyTorch(specgram=lfcc[0],
-                                               title="LFCC (PyTorch)",
-                                               xlabel="Индекс фрейма",
-                                               ylabel="Частотный диапазон",
-                                               colorbar_label="Цветовой градиент спектрограммы",
-                                               type="LFCC",
-                                               util_type="TorchAudio",
-                                               grid_flag=False)
+# PyTorchGraphicsModule.plot_spectrogram_PyTorch(specgram=lfcc[0],
+#                                                title="LFCC (PyTorch)",
+#                                                xlabel="Индекс фрейма",
+#                                                ylabel="Частотный диапазон",
+#                                                colorbar_label="Цветовой градиент спектрограммы",
+#                                                type="LFCC",
+#                                                util_type="TorchAudio",
+#                                                grid_flag=False)
 
 # Вынести в отдельную функцию расчёта MFCC (Librosa)
 melspec = librosa.feature.melspectrogram(
@@ -295,14 +297,14 @@ mfcc_librosa = librosa.feature.mfcc(
     dct_type=2,
     norm="ortho",
 )
-PyTorchGraphicsModule.plot_spectrogram_PyTorch(specgram=mfcc_librosa,
-                                               title="MFCC (Librosa)",
-                                               xlabel="Индекс фрейма",
-                                               ylabel="Частотный диапазон",
-                                               colorbar_label="Цветовой градиент спектрограммы",
-                                               type="MFCC",
-                                               util_type="Librosa",
-                                               grid_flag=False)
+# PyTorchGraphicsModule.plot_spectrogram_PyTorch(specgram=mfcc_librosa,
+#                                                title="MFCC (Librosa)",
+#                                                xlabel="Индекс фрейма",
+#                                                ylabel="Частотный диапазон",
+#                                                colorbar_label="Цветовой градиент спектрограммы",
+#                                                type="MFCC",
+#                                                util_type="Librosa",
+#                                                grid_flag=False)
 
 mse_mfcc = torch.square(torch.from_numpy(mfcc_librosa) - mfcc).mean().item()
 print(f"MSE между PyTorch и Librosa MFCC: {mse_mfcc}")
@@ -319,26 +321,26 @@ lfcc_librosa = compute_lfcc_PyTorch(
     fmin=0.0,
     fmax=MY_CONSTANTS.SAMPLE_RATE / 2.0
 )
-PyTorchGraphicsModule.plot_spectrogram_PyTorch(specgram=lfcc_librosa,
-                                               title="LFCC (Librosa)",
-                                               xlabel="Индекс фрейма",
-                                               ylabel="Частотный диапазон",
-                                               colorbar_label="Цветовой градиент спектрограммы",
-                                               type="LFCC",
-                                               util_type="Librosa",
-                                               grid_flag=False)
+# PyTorchGraphicsModule.plot_spectrogram_PyTorch(specgram=lfcc_librosa,
+#                                                title="LFCC (Librosa)",
+#                                                xlabel="Индекс фрейма",
+#                                                ylabel="Частотный диапазон",
+#                                                colorbar_label="Цветовой градиент спектрограммы",
+#                                                type="LFCC",
+#                                                util_type="Librosa",
+#                                                grid_flag=False)
 
 mse_lfcc = torch.square(torch.from_numpy(lfcc_librosa) - lfcc).mean().item()
 print(f"MSE между PyTorch и Librosa LFCC: {mse_lfcc}")
 
 pitch_PyTorch = F.detect_pitch_frequency(audioMONO_tensor, MY_CONSTANTS.SAMPLE_RATE)
 print(f"Pitch: {pitch_PyTorch}")
-PyTorchGraphicsModule.plot_pitch_PyTorch(waveform=audioMONO_tensor,
-                                         sr=MY_CONSTANTS.SAMPLE_RATE,
-                                         pitch=pitch_PyTorch,
-                                         title="График Питча",
-                                         language_type="RU",
-                                         grid_flag=False)
+# PyTorchGraphicsModule.plot_pitch_PyTorch(waveform=audioMONO_tensor,
+#                                          sr=MY_CONSTANTS.SAMPLE_RATE,
+#                                          pitch=pitch_PyTorch,
+#                                          title="График Питча",
+#                                          language_type="RU",
+#                                          grid_flag=False)
 
 
 audioONNX = load_audio_prev(source_path)
@@ -363,25 +365,25 @@ print(f"MSE между audioONNX_MONO и audioMONO (PyTorch): {mse_mono}")
 print(f"MSE между audioONNX_STEREO и audioSTEREO (PyTorch): {mse_stereo}")
 
 diff = audioONNX_tensor - audioMONO_tensor
-PyTorchGraphicsModule.plot_waveform_PyTorch(waveform=diff,
-                                            sr=MY_CONSTANTS.SAMPLE_RATE,
-                                            title="Разница между audioONNX и audioMONO",
-                                            xlabel="Время (секунды) [s]",
-                                            ylabel="Амплитуда",
-                                            flag="CW",
-                                            grid_flag=False)
+# PyTorchGraphicsModule.plot_waveform_PyTorch(waveform=diff,
+#                                             sr=MY_CONSTANTS.SAMPLE_RATE,
+#                                             title="Разница между audioONNX и audioMONO",
+#                                             xlabel="Время (секунды) [s]",
+#                                             ylabel="Амплитуда",
+#                                             flag="CW",
+#                                             grid_flag=False)
 
 mel_filters_PyTorch = PyTorch_Inference.mel_fb
 print(f"Тип: {type(mel_filters_PyTorch)}")
 
-PyTorchGraphicsModule.plot_fbank_PyTorch(mel_filters=mel_filters_PyTorch,
-                                         title="Mel Filter Bank - TorchAudio (Финальный Результат)",
-                                         xlabel = "Частота (Hz)",
-                                         ylabel = "Индекс Mel Фильтра",
-                                         colorbar_label = "Веса фильтра (цветовой градиент)",
-                                         cmap='viridis',
-                                         interpolation="bicubic",
-                                         grid_flag=False)
+# PyTorchGraphicsModule.plot_fbank_PyTorch(mel_filters=mel_filters_PyTorch,
+#                                          title="Mel Filter Bank - TorchAudio (Финальный Результат)",
+#                                          xlabel = "Частота (Hz)",
+#                                          ylabel = "Индекс Mel Фильтра",
+#                                          colorbar_label = "Веса фильтра (цветовой градиент)",
+#                                          cmap='viridis',
+#                                          interpolation="bicubic",
+#                                          grid_flag=False)
 
 featuresPyMONO, lengthsPyMONO = PyTorch_Inference(audioMONO_tensor.unsqueeze(0),
                                                     torch.tensor([audioMONO_tensor.shape[-1]]))
@@ -423,21 +425,21 @@ print_statistic_data_PyTorch(features=featuresPySTEREO)
 #                                                     language_type="RU",
 #                                                     grid_flag=False)
 
-transcriptionGD = PyTorch_Inference.recognize(audioSTEREO,
-                                              decode_flag="GD",
-                                              ground_truth=ground_truth)
-global transcriptionBS
-for beam_width in beam_widths:
-    for lp in length_penalties:
-        print(f"\nTesting beam_width={beam_width}, length_penalty={lp}")
-        time.sleep(5)
-        transcriptionBS = PyTorch_Inference.recognize(audioSTEREO,
-                                                      decode_flag="BS",
-                                                      beam_width=beam_width,
-                                                      length_penalty=lp,
-                                                      ground_truth=ground_truth)
-
-print("Транскрипция жадного декодирования (PyTorch):", transcriptionGD)
+# transcriptionGD = PyTorch_Inference.recognize(audioSTEREO,
+#                                               decode_flag="GD",
+#                                               ground_truth=ground_truth)
+# global transcriptionBS
+# for beam_width in beam_widths:
+#     for lp in length_penalties:
+#         print(f"\nTesting beam_width={beam_width}, length_penalty={lp}")
+#         time.sleep(5)
+#         transcriptionBS = PyTorch_Inference.recognize(audioSTEREO,
+#                                                       decode_flag="BS",
+#                                                       beam_width=beam_width,
+#                                                       length_penalty=lp,
+#                                                       ground_truth=ground_truth)
+#
+# print("Транскрипция жадного декодирования (PyTorch):", transcriptionGD)
 # print("Транскрипция декодирования по лучу (PyTorch):", transcriptionBS)
 
 """![link](https://drive.google.com/drive/MyDrive/n_fft.png)"""
@@ -661,22 +663,22 @@ transcriptionGD_NumPy, metricsGD_NumPy = preprocessor_NumPy.recognize(
     ground_truth=ground_truth
 )
 
-transcriptionBS_NumPy, metricsBS_NumPy = None, None
-for beam_width in beam_widths:
-    for lp in length_penalties:
-        print(f"\nTesting beam_width={beam_width}, length_penalty={lp}")
-        time.sleep(5)
-        transcriptionBS_NumPy, metricsBS_NumPy = preprocessor_NumPy.recognize(
-            waveforms=audio_prev,
-            decode_flag="BS",
-            beam_width=beam_width,
-            length_penalty=lp,
-            ground_truth=ground_truth
-        )
-        print(f"Транскрипция (Beam Search, beam_width={beam_width}, length_penalty={lp}): {transcriptionBS_NumPy}")
-
-print("Транскрипция жадного декодирования (NumPy):", transcriptionGD_NumPy)
-print("Транскрипция декодирования по лучу (NumPy):", transcriptionBS_NumPy)
+# transcriptionBS_NumPy, metricsBS_NumPy = None, None
+# for beam_width in beam_widths:
+#     for lp in length_penalties:
+#         print(f"\nTesting beam_width={beam_width}, length_penalty={lp}")
+#         time.sleep(5)
+#         transcriptionBS_NumPy, metricsBS_NumPy = preprocessor_NumPy.recognize(
+#             waveforms=audio_prev,
+#             decode_flag="BS",
+#             beam_width=beam_width,
+#             length_penalty=lp,
+#             ground_truth=ground_truth
+#         )
+#         print(f"Транскрипция (Beam Search, beam_width={beam_width}, length_penalty={lp}): {transcriptionBS_NumPy}")
+#
+# print("Транскрипция жадного декодирования (NumPy):", transcriptionGD_NumPy)
+# print("Транскрипция декодирования по лучу (NumPy):", transcriptionBS_NumPy)
 # transcription_NumPy, metrics_NumPy = decode_ctc_greedy(
 #     log_probs=log_probs_NumPy_MONO,
 #     vocab=VOCAB,
@@ -702,3 +704,63 @@ print("Транскрипция декодирования по лучу (NumPy)
 #         print(f"\nTesting beam_width={beam_width}, length_penalty={lp}")
 #         time.sleep(5)
 #         print("Транскрипция декодирования по лучу (NumPy):", transcription)
+
+rnnt_model = RnntASRPyTorch(
+    encoder_path="onnx_models/encoder-stt_ru_fastconformer_hybrid_large_pc_RNNT.onnx",
+    decoder_joint_path="onnx_models/decoder_joint-stt_ru_fastconformer_hybrid_large_pc_RNNT.onnx",
+    features=80  # Update this to match the model's expectation
+)
+
+# RNN-T декодирование
+transcription_rnnt_gd = rnnt_model.recognize(
+    audioSTEREO,
+    decode_flag="GD",
+    ground_truth=ground_truth,
+    max_steps=500,
+    # max_tokens_per_time_step=10
+)
+
+for beam_width in beam_widths:
+    for lp in [0.5, 1.0]:
+        print(f"\nTesting RNN-T beam_width={beam_width}, length_penalty={lp}")
+        time.sleep(5)
+        transcription_rnnt_bs = rnnt_model.recognize(
+            audioSTEREO,
+            decode_flag="BS",
+            beam_width=beam_width,
+            length_penalty=lp,
+            ground_truth=ground_truth,
+            max_steps=500,
+            # max_tokens_per_time_step=10
+        )
+
+preprocessor_Rnnt_NumPy = RnntASRNumPy(
+    encoder_path="onnx_models/encoder-stt_ru_fastconformer_hybrid_large_pc_RNNT.onnx",
+    decoder_joint_path="onnx_models/decoder_joint-stt_ru_fastconformer_hybrid_large_pc_RNNT.onnx"
+)
+
+# Инференс RNN-T NumPy
+audio_prev = audio_prev.astype(np.float32)
+print(f"Форма audio_prev перед передачей в recognize (RNN-T NumPy): {audio_prev.shape}")
+transcriptionGD_Rnnt_NumPy, metricsGD_Rnnt_NumPy = preprocessor_Rnnt_NumPy.recognize(
+    waveforms=audio_prev,
+    decode_flag="GD",
+    ground_truth=ground_truth
+)
+
+transcriptionBS_Rnnt_NumPy, metricsBS_Rnnt_NumPy = None, None
+for beam_width in beam_widths:
+    for lp in length_penalties:
+        print(f"\nTesting RNN-T NumPy beam_width={beam_width}, length_penalty={lp}")
+        time.sleep(5)
+        transcriptionBS_Rnnt_NumPy, metricsBS_Rnnt_NumPy = preprocessor_Rnnt_NumPy.recognize(
+            waveforms=audio_prev,
+            decode_flag="BS",
+            beam_width=beam_width,
+            length_penalty=lp,
+            ground_truth=ground_truth
+        )
+        print(f"Транскрипция (RNN-T NumPy Beam Search, beam_width={beam_width}, length_penalty={lp}): {transcriptionBS_Rnnt_NumPy}")
+
+print("Транскрипция жадного декодирования (RNN-T NumPy):", transcriptionGD_Rnnt_NumPy)
+print("Транскрипция декодирования по лучу (RNN-T NumPy):", transcriptionBS_Rnnt_NumPy)

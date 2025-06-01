@@ -78,40 +78,6 @@ def load_nemo_model(
     model = nemo_asr.models.ASRModel.from_pretrained(f"nvidia/{model_name}")
     return model.to(device)
 
-# Экспорт модели в ONNX
-# def export_nemo_to_onnx(
-#     model_name: str = NEMO_CONSTANTS.MODEL_TYPE,
-#     onnx_dir: str = NEMO_CONSTANTS.DIRNAME,
-#     device: str = "cpu",
-#     download_root: Optional[str] = None,
-#     decoder_type: str = "ctc"  # Явно указываем RNNT
-# ) -> None:
-#     # Создаём директорию для ONNX
-#     onnx_dir = Path(onnx_dir)
-#     onnx_dir.mkdir(exist_ok=True, parents=True)
-#
-#     # Загружаем модель
-#     model = load_nemo_model(
-#         model_name=model_name,
-#         device=device,
-#         download_root=download_root
-#     )
-#
-#     model.set_export_config({"decoder_type": decoder_type})
-#
-#     # Экспортируем в ONNX
-#     onnx_path = str(Path(onnx_dir) / f"{model_name}.onnx")
-#     model.export(onnx_path)
-#
-#     # Сохраняем словарь
-#     vocab_path = Path(onnx_dir) / f"vocab-{model_name}.txt"
-#     with vocab_path.open("wt", encoding="utf-8") as f:
-#         for i, token in enumerate([*model.tokenizer.vocab, "<blk>"]):
-#             f.write(f"{token} {i}\n")
-#
-#     print(f"Модель '{model_name}' успешно экспортирована в {onnx_path}")
-#     print(f"Словарь сохранён в {vocab_path}")
-
 def export_nemo_to_onnx(
         model_name: str = NEMO_CONSTANTS.MODEL_TYPE,
         onnx_dir: str = NEMO_CONSTANTS.DIRNAME,
