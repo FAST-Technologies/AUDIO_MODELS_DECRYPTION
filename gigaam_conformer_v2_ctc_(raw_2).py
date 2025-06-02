@@ -717,22 +717,27 @@ transcription_rnnt_gd = rnnt_model.recognize(
     decode_flag="GD",
     ground_truth=ground_truth,
     max_steps=500,
+    min_tokens=150
     # max_tokens_per_time_step=10
 )
 
 for beam_width in beam_widths:
-    for lp in [0.5, 1.0]:
-        print(f"\nTesting RNN-T beam_width={beam_width}, length_penalty={lp}")
-        time.sleep(5)
-        transcription_rnnt_bs = rnnt_model.recognize(
-            audioSTEREO,
-            decode_flag="BS",
-            beam_width=beam_width,
-            length_penalty=lp,
+    for lp in [0.1, 0.3, 0.5, 1.0]:
+        print(f"\nТестирование RNN-T: beam_width={beam_width}, length_penalty={lp}")
+        time.sleep(5)  # Задержка 5 секунд
+        transcription = rnnt_model.recognize(
+            waveforms=audioSTEREO,
+            decode_flag="BS",  # Используем декодирование по лучу
+            beam_width=beam_width,  # Передаем текущий beam_width
+            length_penalty=lp,  # Передаем текущий length_penalty
             ground_truth=ground_truth,
-            max_steps=500,
-            # max_tokens_per_time_step=10
+            max_steps=5000,
+            min_tokens=150  # Передаем min_tokens
         )
+        print(f"Транскрипция: {transcription}")
+
+print("Транскрипция жадного декодирования (RNN-T PyTorch):", transcription_rnnt_gd)
+print("Транскрипция декодирования по лучу (RNN-T PyTorch):", transcription)
 
 preprocessor_Rnnt_NumPy = RnntASRNumPy(
     encoder_path="onnx_models/encoder-stt_ru_fastconformer_hybrid_large_pc_RNNT.onnx",
