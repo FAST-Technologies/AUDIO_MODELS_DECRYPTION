@@ -8,6 +8,7 @@ import omegaconf
 import time
 import onnxruntime as rt
 import hydra
+import json
 from IPython.display import Audio
 import librosa
 import soundfile as sf
@@ -28,6 +29,11 @@ import nemo
 import matplotlib.pyplot as plt
 import nemo.collections.asr as nemo_asr
 print(nemo.__version__)
+from nemo.collections.asr.models import EncDecRNNTModel
+try:
+    import nemo_asr
+except ImportError:
+    print("nemo_asr successfully removed")
 
 # Проверка совместимости NumPy и PyTorch
 # Проверяем версию NumPy (должна быть 1.26.4 - ниже второй)
@@ -99,74 +105,13 @@ if not os.path.exists(source_path):
 #                    device="cpu")
 # model.to_onnx(dir_path=MY_CONSTANTS.DIRNAME)
 
-## 📝Создаем ONNX файл (для модели Nemo FastConformer Hybrid RNNT)
-# Получение модели из виртуальной среды
-# Default cache directory
-
-# cache_dir = os.path.expanduser(MY_CONSTANTS.DOWNLOAD_CACHE_NEMO)
-# model_path = os.path.join(cache_dir, f"{MY_CONSTANTS.MODEL_TYPE_RNNT}.nemo")
-# 
-# print("Got over here")
-# 
-# # Проверяем наличие файла модели
-# if not os.path.exists(model_path):
-#     print(f"Downloading model {MY_CONSTANTS.MODEL_TYPE_RNNT}...")
-#     model = nemo_asr.models.EncDecRNNTModel.from_pretrained(
-#         model_name="stt_ru_fastconformer_hybrid_large_pc",
-#         map_location="cpu"
-#     )
-#     model.save_to(model_path)
-#     print(f"Model saved to {model_path}")
-# else:
-#     model = EncDecRNNTModel.restore_from(restore_path=model_path, map_location="cpu")
-# 
-# print("Trying")
-
-cache_dir = os.path.expanduser(MY_CONSTANTS.DOWNLOAD_CACHE_NEMO)
-model_path = os.path.join(cache_dir, f"stt_ru_fastconformer_hybrid_large_pc.nemo")
-
-print("Got over here")
-
-# Если файл не обнаружен - скачаем его
-if os.path.exists(model_path):
-    file_size = os.path.getsize(model_path)
-    print(f"Файл найден: {model_path}, размер: {file_size} байт")
-    if file_size == 0:
-        print("Файл пустой, удаляем и попробуем скачать заново")
-        os.remove(model_path)
-else:
-    print(f"Файл не найден: {model_path}, будет выполнен новый запрос")
-
-print("Trying")
-
-# # Загружаем модель NeMo
-# model = EncDecRNNTModel.restore_from(restore_path=model_path, map_location="cpu")
-# logging.info(f"Модель {MY_CONSTANTS.MODEL_TYPE_RNNT} успешно загружена")
-#
-# # Извлекаем вокабуляр из модели
-# vocab = list(model.decoder.vocabulary)
-# vocab_dict = {token: idx for idx, token in enumerate(vocab)}
-# blank_idx = vocab.index("<blank>")
-# max_vocab_idx = len(vocab) - 1
-#
-# # Сохраняем вокабуляр в файл
-# vocab_path = os.path.join(MY_CONSTANTS.DIRNAME, "vocab-stt_ru_fastconformer_hybrid_large_pc_RNNT.txt")
-# os.makedirs(MY_CONSTANTS.DIRNAME, exist_ok=True)
-# with open(vocab_path, "w", encoding="utf-8") as f:
-#     for token, idx in vocab_dict.items():
-#         f.write(f"{token} {idx}\n")
-# print(f"Вокабуляр сохранён в: {vocab_path}")
-
-# Экспортируем модель в ONNX
-export_nemo_to_onnx(
+model, vocab_path, params_path = export_nemo_to_onnx(
     model_name=MY_CONSTANTS.MODEL_TYPE_RNNT,
     onnx_dir=MY_CONSTANTS.DIRNAME,
     device="cpu",
-    decoder_types=["rnnt"]  # Используем только RNNT
+    decoder_types=["rnnt"]
 )
-
-# logging.info(f"Экспорт модели в ONNX завершён. Вокабуляр доступен в {vocab_path}")
-print("Hooray")
+logging.info(f"Экспорт модели в ONNX завершён. Вокабуляр доступен в {vocab_path}")
 
 from RnntASPPyTorch_DIR.RnntASPPyTorch import RnntASRPyTorch
 from RnntASPNumpy_DIR.RnntASPNumpy import RnntASRNumPy

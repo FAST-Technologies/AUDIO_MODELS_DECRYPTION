@@ -52,7 +52,7 @@ class RnntASRPyTorch(nn.Module):
                  encoder_path: str,
                  decoder_joint_path: str,
                  sample_rate: int = 16000,
-                 features: int = 80) -> None:
+                 features: int = 64) -> None:
         super().__init__()
         self.sample_rate = sample_rate
         self.features = features
@@ -85,12 +85,13 @@ class RnntASRPyTorch(nn.Module):
         # Use NeMo's AudioToMelSpectrogramPreprocessor for feature extraction
         self.audio_to_mel = nemo_preproc.AudioToMelSpectrogramPreprocessor(
             sample_rate=16000,
-            window_size=0.02,
+            window_size=0.025,
             window_stride=0.01,
             window="hann",
-            normalize=False,
-            n_fft=None,
-            features=features  # Set to 80 to match model expectations
+            normalize="per_feature",
+            n_fft=512,
+            preemph=0.97,
+            features=features,
         )
 
     def _print_tensor_info(self, title: str, tensors: List[rt.NodeArg]) -> None:
@@ -146,7 +147,9 @@ class RnntASRPyTorch(nn.Module):
         return norm_mel, self.out_len(length)
 
     @torch.inference_mode()
-    def encode(self, features: np.ndarray, lengths: np.ndarray) -> np.ndarray:
+    def encode(self,
+               features: np.ndarray,
+               lengths: np.ndarray) -> np.ndarray:
         inputs = {
             self._encoder_input_name: features,
             self._encoder_length_name: lengths.astype(np.int64)
@@ -177,7 +180,6 @@ class RnntASRPyTorch(nn.Module):
         # encoder_output_t = (encoder_output_t - encoder_output_t.mean()) / (encoder_output_t.std() + 1e-9)
 
         inputs = {
-            # self._decoder_input_name: encoder_output_t,
             self._decoder_input_name: encoder_output_t,
             self._decoder_prev_token_name: prev_token.astype(np.int32),
             self._decoder_joint.get_inputs()[2].name: target_length,
@@ -225,7 +227,8 @@ class RnntASRPyTorch(nn.Module):
                 step
             )
 
-            temperature = 0.5
+            # temperature = 0.5
+            temperature = 1.0
             probs = np.exp(logits[0, 0, 0] / temperature - np.max(logits[0, 0, 0] / temperature))
             probs /= np.sum(probs)
             print(f"Step {step}, Top 5 probs: {np.sort(probs)[-5:]}")
@@ -268,9 +271,17 @@ class RnntASRPyTorch(nn.Module):
                                      flag="greedy")
         return transcription, metrics
 
-    def decode_rnnt_beam_search(self, encoder_output: np.ndarray, vocab: List[str], blank_idx: int, max_vocab_idx: int,
-                                beam_width: int = 3, length_penalty: float = 1.0, ground_truth: str = None,
-                                max_steps: int = 1000, min_tokens: int = 10) -> Tuple[str, Dict[str, float]]:
+    def decode_rnnt_beam_search(self,
+                                encoder_output: np.ndarray,
+                                vocab: List[str],
+                                blank_idx: int,
+                                max_vocab_idx: int,
+                                beam_width: int = 3,
+                                length_penalty: float = 1.0,
+                                ground_truth: str = None,
+                                max_steps: int = 1000,
+                                min_tokens: int = 10
+    ) -> Tuple[str, Dict[str, float]]:
         batch_size, hidden_size, time_frames = encoder_output.shape
         state1 = np.random.normal(0, 0.1, (1, 1, self.hidden_size)).astype(np.float32)
         state2 = np.random.normal(0, 0.1, (1, 1, self.hidden_size)).astype(np.float32)
