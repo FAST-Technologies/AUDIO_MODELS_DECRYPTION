@@ -14,11 +14,11 @@ class Constants:
       MODEL_NAME: str = "v2_ctc.onnx"
       # MODEL_TYPE_RNNT: str = "v2_rnnt_Nemo_FastConformer_Hybrid"
       # MODEL_NAME_RNNT: str = "v2_rnnt_Nemo_FastConformer_Hybrid.onnx"
-      MODEL_TYPE_RNNT: str = "v2_rnnt"
+      MODEL_TYPE_RNNT: str = "stt_ru_fastconformer_hybrid_large_pc"
       MODEL_NAME_RNNT: str = "v2_rnnt.onnx"
-      DOWNLOAD_CACHE: str = "~\.cache\gigaam"
+      DOWNLOAD_CACHE: str = "~/.cache/gigaam"
       DOWNLOAD_CACHE_NEMO: str = "~/.cache/nemo"
-      DIRNAME: str = ".\onnx_models"
+      DIRNAME: str = "./onnx_models"
       BLANK_IDX: int = 33  # Blank token index for CTC
       D_MODEL: int = 768 # Model dimension (e.g., for encoder)
       DTYPE: Type[np.dtype] = np.float32

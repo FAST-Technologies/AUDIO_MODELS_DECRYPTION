@@ -1,16 +1,14 @@
-from typing import List, Tuple, Dict, Any
 import numpy as np
 import onnxruntime as rt
 import torch
 import torch.nn as nn
-from torch import Tensor
 import torchaudio
+from typing import List, Tuple
 import matplotlib.pyplot as plt
+from torch import Tensor
 import nemo.collections.asr.modules.audio_preprocessing as nemo_preproc
 
-from MetricsClass import return_metrics
-
-# Загружаем словарь из файла
+# Загрузка словаря
 def load_vocab(vocab_path: str) -> List[str]:
     vocab = []
     with open(vocab_path, "r", encoding="utf-8") as f:
@@ -31,8 +29,8 @@ def load_vocab(vocab_path: str) -> List[str]:
 
 VOCAB = load_vocab("onnx_models/vocab-stt_ru_fastconformer_hybrid_large_pc_RNNT.txt")
 BLANK_IDX = VOCAB.index("<unk>")
-BLK_IDX = VOCAB.index("<blk>") if "<blk>" in VOCAB else 1395  # Adjust to 1024 since vocab size is 1025
-PAD_IDX = VOCAB.index("<pad>") if "<pad>" in VOCAB else 1024
+BLK_IDX = VOCAB.index("<blk>") if "<blk>" in VOCAB else 1395  # Default to 1395 if not found
+PAD_IDX = VOCAB.index("<pad>") if "<pad>" in VOCAB else 1024  # Adjust to 1024 as last index
 MAX_VOCAB_IDX = len(VOCAB) - 1
 
 # Проверка словаря
@@ -41,39 +39,21 @@ print(f"Sample vocab tokens: {VOCAB[:10]}")
 print(f"BLANK_IDX: {BLANK_IDX}, BLK_IDX: {BLK_IDX}, PAD_IDX: {PAD_IDX}, MAX_VOCAB_IDX: {MAX_VOCAB_IDX}")
 
 class RnntASRPyTorch(nn.Module):
-    """
-    Module for RNN-T based Automatic Speech Recognition (ASR) using PyTorch and ONNX models.
-    Processes raw audio signals, extracts Log-mel spectrogram features, and performs transcription
-    using an RNN-T model with greedy decoding or beam search.
-    """
-
-    @torch.inference_mode()
-    def __init__(self,
-                 encoder_path: str,
-                 decoder_joint_path: str,
-                 sample_rate: int = 16000,
+    def __init__(self, encoder_path: str, decoder_joint_path: str, sample_rate: int = 16000,
                  features: int = 80) -> None:
         super().__init__()
         self.sample_rate = sample_rate
         self.features = features
-        self.hidden_size = 640  # Consistent with original
+        self.hidden_size = 640
         self.vocab = VOCAB
         self.blank_idx = BLANK_IDX
         self.blk_idx = BLK_IDX
         self.pad_idx = PAD_IDX
         self.max_vocab_idx = MAX_VOCAB_IDX
 
-        # Загружаем ONNX модели
         self._encoder = rt.InferenceSession(encoder_path, providers=["CPUExecutionProvider"])
         self._decoder_joint = rt.InferenceSession(decoder_joint_path, providers=["CPUExecutionProvider"])
 
-        # Проверяем входы и выходы моделей
-        self._print_tensor_info("Encoder Inputs", self._encoder.get_inputs())
-        self._print_tensor_info("Encoder Outputs", self._encoder.get_outputs())
-        self._print_tensor_info("Decoder/Joint Inputs", self._decoder_joint.get_inputs())
-        self._print_tensor_info("Decoder/Joint Outputs", self._decoder_joint.get_outputs())
-
-        # Имена входов и выходов
         self._encoder_input_name = self._encoder.get_inputs()[0].name
         self._encoder_length_name = self._encoder.get_inputs()[1].name
         self._decoder_input_name = self._decoder_joint.get_inputs()[0].name
@@ -82,7 +62,7 @@ class RnntASRPyTorch(nn.Module):
         self._decoder_output_name = self._decoder_joint.get_outputs()[0].name
         self._decoder_state_out_name = self._decoder_joint.get_outputs()[1].name
 
-        # Use NeMo's AudioToMelSpectrogramPreprocessor for feature extraction
+        # Adjust audio preprocessing to match expected features
         self.audio_to_mel = nemo_preproc.AudioToMelSpectrogramPreprocessor(
             sample_rate=16000,
             window_size=0.02,
@@ -90,13 +70,8 @@ class RnntASRPyTorch(nn.Module):
             window="hann",
             normalize=False,
             n_fft=None,
-            features=features  # Set to 80 to match model expectations
+            features=features  # Use 64 features as specified
         )
-
-    def _print_tensor_info(self, title: str, tensors: List[rt.NodeArg]) -> None:
-        print(f"{title}:")
-        for tensor in tensors:
-            print(f"Name: {tensor.name}, Shape: {tensor.shape}")
 
     def normalize_features(self, features: Tensor) -> Tensor:
         mean = features.mean(dim=(1, 2), keepdim=True)
@@ -106,11 +81,9 @@ class RnntASRPyTorch(nn.Module):
             std = std + 1e-6
         return (features - mean) / std
 
-    @torch.inference_mode()
     def out_len(self, input_lengths: Tensor) -> Tensor:
         return input_lengths.div(160, rounding_mode="floor").add(1).long()
 
-    @torch.inference_mode()
     def extract_features(self, input_signal: Tensor, length: Tensor) -> Tuple[Tensor, Tensor]:
         print(f"input_signal shape: {input_signal.shape}, min: {input_signal.min().item()}, max: {input_signal.max().item()}")
         if torch.isnan(input_signal).any() or torch.isinf(input_signal).any():
@@ -145,7 +118,6 @@ class RnntASRPyTorch(nn.Module):
 
         return norm_mel, self.out_len(length)
 
-    @torch.inference_mode()
     def encode(self, features: np.ndarray, lengths: np.ndarray) -> np.ndarray:
         inputs = {
             self._encoder_input_name: features,
@@ -158,26 +130,16 @@ class RnntASRPyTorch(nn.Module):
             print("Warning: encoder_output contains NaN or Inf values!")
         return encoder_output
 
-    @torch.inference_mode()
-    def decode_step(self,
-                    encoder_output: np.ndarray,
-                    prev_token: np.ndarray,
-                    state: Tuple[np.ndarray, np.ndarray],
-                    t: int) -> Tuple[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
+    def decode_step(self, encoder_output: np.ndarray, prev_token: np.ndarray,
+                    state: Tuple[np.ndarray, np.ndarray], t: int) -> Tuple[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
         state1, state2 = state
         target_length = np.array([1], dtype=np.int32)
         encoder_output_t = encoder_output[:, :, t:t + 1]
-        print(f"Decode step t={t}: encoder_output_t shape = {encoder_output_t.shape}, prev_token = {prev_token}")
-
         if encoder_output_t.shape[2] == 0:
-            print(f"Error: encoder_output_t is empty at t={t}, returning dummy logits")
             dummy_logits = np.zeros((1, 1, 1, len(self.vocab)), dtype=np.float32)  # Adjusted to 1025
             return dummy_logits, (state1, state2)
 
-        # encoder_output_t = (encoder_output_t - encoder_output_t.mean()) / (encoder_output_t.std() + 1e-9)
-
         inputs = {
-            # self._decoder_input_name: encoder_output_t,
             self._decoder_input_name: encoder_output_t,
             self._decoder_prev_token_name: prev_token.astype(np.int32),
             self._decoder_joint.get_inputs()[2].name: target_length,
@@ -191,18 +153,9 @@ class RnntASRPyTorch(nn.Module):
             inputs
         )
         logits = outputs[0]
-        print(f"Raw logits min: {logits.min()}, max: {logits.max()}")
-        # logits = logits - np.max(logits)  # Стабилизация логитов
         return logits, (outputs[1], outputs[2])
 
-    def decode_rnnt_greedy(self,
-                           encoder_output: np.ndarray,
-                           vocab: List[str],
-                           blank_idx: int,
-                           max_vocab_idx: int,
-                           ground_truth: str = None,
-                           max_steps: int = 1000,
-                           min_tokens: int = 10) -> Tuple[str, Dict[str, float]]:
+    def decode_rnnt_greedy(self, encoder_output: np.ndarray, max_steps: int = 1000) -> str:
         if encoder_output.shape[0] != 1:
             raise ValueError(f"Expected batch_size=1, got {encoder_output.shape[0]}")
 
@@ -231,7 +184,7 @@ class RnntASRPyTorch(nn.Module):
             print(f"Step {step}, Top 5 probs: {np.sort(probs)[-5:]}")
             print(f"Top 5 indices: {np.argsort(probs)[-5:]}")
 
-            probs[blank_idx] = 0.0
+            probs[self.blank_idx] = 0.0
             probs[self.blk_idx] = 0.0
             probs[self.pad_idx] = 0.0
             token_idx = np.argmax(probs)
@@ -253,104 +206,13 @@ class RnntASRPyTorch(nn.Module):
 
             step += 1
 
-        transcription = "".join(self.vocab[tok] for tok in decoded_ids if
+        result = "".join(self.vocab[tok] for tok in decoded_ids if
                          tok < len(self.vocab) and tok != self.blk_idx and tok != self.pad_idx)
-        print(f"Decoded transcription (Greedy): {transcription}")
-        print(f"Total tokens generated: {len(decoded_ids)}")
         print(f"Decoded IDs: {decoded_ids}")
         print(f"Decoded tokens: {[self.vocab[tok] for tok in decoded_ids]}")
-        metrics = {}
-        if ground_truth and transcription:
-            metrics = return_metrics(transcription=transcription,
-                                     ground_truth=ground_truth,
-                                     metrics=metrics,
-                                     total_log_prob=0.0,  # No log probability calculated here
-                                     flag="greedy")
-        return transcription, metrics
+        return result
 
-    def decode_rnnt_beam_search(self, encoder_output: np.ndarray, vocab: List[str], blank_idx: int, max_vocab_idx: int,
-                                beam_width: int = 3, length_penalty: float = 1.0, ground_truth: str = None,
-                                max_steps: int = 1000, min_tokens: int = 10) -> Tuple[str, Dict[str, float]]:
-        batch_size, hidden_size, time_frames = encoder_output.shape
-        state1 = np.random.normal(0, 0.1, (1, 1, self.hidden_size)).astype(np.float32)
-        state2 = np.random.normal(0, 0.1, (1, 1, self.hidden_size)).astype(np.float32)
-        beams = [(tuple(), 0.0, (state1, state2), np.array([[0]]), 0, 0)]
-        cache = {}
-
-        step = 0
-        while step < max_steps:
-            new_beams = {}
-            for seq, score, (state1, state2), prev_token, t, token_count in beams:
-                if t >= time_frames and token_count >= min_tokens:
-                    new_beams[seq] = (seq, score, (state1, state2), prev_token, t, token_count)
-                    continue
-
-                cache_key = (tuple(seq), tuple(prev_token.flatten()), t % time_frames)
-                if cache_key in cache:
-                    logits, (new_state1, new_state2) = cache[cache_key]
-                else:
-                    logits, (new_state1, new_state2) = self.decode_step(encoder_output, prev_token, (state1, state2),
-                                                                        t % time_frames)
-                    cache[cache_key] = (logits, (new_state1, new_state2))
-
-                logits_t = logits[0, 0, 0]  # (V+1,)
-                # Выбираем топ-100 токенов по вероятности
-                top_k_indices = np.argsort(logits_t)[-100:]
-                top_k_indices = np.concatenate([top_k_indices, np.array([blank_idx])])
-                logits_t_sampled = logits_t[top_k_indices]
-                top_indices = np.argpartition(logits_t_sampled, -beam_width)[-beam_width:]
-                top_probs = logits_t_sampled[top_indices]
-                top_indices = top_k_indices[top_indices]
-
-                for token, prob in zip(top_indices, top_probs):
-                    new_score = score + prob
-                    if token == blank_idx:
-                        new_score -= 3.0
-                    if len(seq) > 1 and seq[-1] == token and token != blank_idx:
-                        new_score -= 1.0  # Увеличенный штраф за повторение
-                    # Проверка на чрезмерное повторение
-                    if len(seq) > 2 and seq[-1] == token and seq[-2] == token and token != blank_idx:
-                        continue  # Пропускаем токен
-                    new_seq = list(seq) + ([token] if token != blank_idx else [])
-                    new_count = token_count + (1 if token != blank_idx else 0)
-                    new_beams[tuple(new_seq)] = (
-                        tuple(new_seq), new_score, (new_state1, new_state2), np.array([[token]]), t + 1, new_count)
-
-            beams = sorted(new_beams.values(), key=lambda x: x[1] / (max(1, x[5]) ** length_penalty), reverse=True)[
-                    :beam_width]
-            step += 1
-            if step % 50 == 0:
-                cache.clear()
-            if all(t >= time_frames and count >= min_tokens for _, _, _, _, t, count in beams):
-                break
-
-        best_seq, best_score, _, _, _, _ = beams[0]
-        transcription = "".join(vocab[tok] for tok in best_seq if tok != blank_idx and tok != self.blk_idx and tok != self.pad_idx)
-        print(f"Transcription (Beam Search, beam_width={beam_width}, length_penalty={length_penalty}): {transcription}")
-        print(f"Log probability (Beam Search): {best_score:.15f}")
-        print(f"Total tokens in best sequence: {len(best_seq)}")
-        metrics = {}
-        if ground_truth and transcription:
-            metrics = return_metrics(transcription=transcription,
-                                     ground_truth=ground_truth,
-                                     metrics=metrics,
-                                     total_log_prob=best_score,
-                                     beam_width=beam_width,
-                                     length_penalty=length_penalty,
-                                     flag="beam")
-        return transcription, metrics
-
-    def recognize(self,
-                  waveforms: np.ndarray,
-                  decode_flag: str = "GD",
-                  beam_width: int = 10,
-                  length_penalty: float = 0.7,
-                  ground_truth: str = None,
-                  max_steps: int = 1000,
-                  min_tokens: int = 10) -> str:
-        if not isinstance(waveforms, np.ndarray):
-            raise TypeError(f"Expected waveforms to be a numpy.ndarray, got {type(waveforms)}")
-
+    def recognize(self, waveforms: np.ndarray) -> str:
         if waveforms.dtype != np.float32:
             waveforms = waveforms.astype(np.float32)
         if waveforms.ndim == 2 and waveforms.shape[0] > 1:
@@ -358,10 +220,6 @@ class RnntASRPyTorch(nn.Module):
         elif waveforms.ndim == 2:
             waveforms = waveforms[0]
         waveforms = waveforms.flatten()
-
-        audio_length_samples = len(waveforms)
-        expected_time_frames = audio_length_samples // 160 + 1
-        print(f"Input audio length: {audio_length_samples} samples, expected time frames: {expected_time_frames}")
 
         audio_tensor = torch.from_numpy(waveforms).float().unsqueeze(0)
         audio_length = torch.tensor([audio_tensor.shape[1]], dtype=torch.long)
@@ -394,34 +252,25 @@ class RnntASRPyTorch(nn.Module):
         lengths = lengths.detach().cpu().numpy().astype(np.int64)
 
         encoder_output = self.encode(features, lengths)
-        time_frames = encoder_output.shape[2]
-        print(f"Encoder output shape: {encoder_output.shape}, time_frames: {time_frames}")
+        return self.decode_rnnt_greedy(encoder_output)
 
-        max_steps = min(max_steps, time_frames * 10)
+if __name__ == "__main__":
+    asr = RnntASRPyTorch("onnx_models/encoder-stt_ru_fastconformer_hybrid_large_pc_RNNT.onnx",
+                         "onnx_models/decoder_joint-stt_ru_fastconformer_hybrid_large_pc_RNNT.onnx")
+    waveform, sr = torchaudio.load("audio_files/20250404_174500.wav")
+    print(f"Waveform shape: {waveform.shape}, sample rate: {sr}")
+    if sr != 16000:
+        resampler = torchaudio.transforms.Resample(sr, 16000)
+        waveform = resampler(waveform)
+        print(f"Resampled waveform shape: {waveform.shape}")
 
-        if decode_flag == "GD":
-            transcription, _ = self.decode_rnnt_greedy(
-                encoder_output=encoder_output,
-                vocab=self.vocab,
-                blank_idx=self.blank_idx,
-                max_vocab_idx=self.max_vocab_idx,
-                ground_truth=ground_truth,
-                max_steps=max_steps,
-                min_tokens=min_tokens
-            )
-        elif decode_flag == "BS":
-            transcription, _ = self.decode_rnnt_beam_search(
-                encoder_output=encoder_output,
-                vocab=self.vocab,
-                blank_idx=self.blank_idx,
-                max_vocab_idx=self.max_vocab_idx,
-                beam_width=beam_width,
-                length_penalty=length_penalty,
-                ground_truth=ground_truth,
-                max_steps=max_steps,
-                min_tokens=min_tokens
-            )
-        else:
-            raise ValueError("decode_flag must be 'GD' или 'BS'")
+    plt.figure(figsize=(10, 4))
+    plt.plot(waveform[0].numpy())
+    plt.title("Waveform")
+    plt.xlabel("Sample")
+    plt.ylabel("Amplitude")
+    plt.tight_layout()
+    plt.show()
 
-        return transcription
+    text = asr.recognize(waveform.numpy())
+    print("Распознанный текст:", text)

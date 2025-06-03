@@ -18,9 +18,9 @@ from typing import Tuple, Optional, List
 # Аналог MY_CONSTANTS для NeMo
 class NeMoConstants:
     DOWNLOAD_CACHE = "E:/Прога (вся)/NeuralSpecter/AUDIO_MODELS_DECRYPTION/cache"
-    MODEL_TYPE = "stt_ru_fastconformer_hybrid_large_pc"
+    MODEL_TYPE = "stt_multilingual_fastconformer_hybrid_large_pc"
     DIRNAME = "onnx_models"
-    _URL_DIR = "https://huggingface.co/nvidia/stt_ru_fastconformer_hybrid_large_pc/resolve/main/stt_ru_fastconformer_hybrid_large_pc.nemo" # Пример URL, уточните реальный источник
+    _URL_DIR = "https://huggingface.co/nvidia/stt_multilingual_fastconformer_hybrid_large_pc/resolve/main/stt_multilingual_fastconformer_hybrid_large_pc.nemo" # Пример URL, уточните реальный источник
 
 NEMO_CONSTANTS = NeMoConstants()
 

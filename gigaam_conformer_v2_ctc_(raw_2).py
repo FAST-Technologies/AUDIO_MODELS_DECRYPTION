@@ -1,10 +1,9 @@
 # Импорт необходимых нам модулей и библиотек
 import os
-
-
 import numpy as np
 import torch
 import torchaudio
+import logging
 import omegaconf
 import time
 import onnxruntime as rt
@@ -12,13 +11,9 @@ import hydra
 from IPython.display import Audio
 import librosa
 import soundfile as sf
-
 import torchaudio.functional as F
 import torchaudio.transforms as T
-
 from Nemo_FastConformer_Hybrid_RNNT_To_ONNX.LoadClass import export_nemo_to_onnx
-from RnntASPPyTorch_DIR.RnntASPPyTorch import RnntASRPyTorch
-from RnntASPNumpy_DIR.RnntASPNumpy import RnntASRNumPy
 
 # Проверяем версии основных пакетов
 print("Torch version:", torch.__version__)
@@ -30,6 +25,7 @@ print("Onnxruntime version:", rt.__version__)
 print("Librosa version:", librosa.__version__)
 
 import nemo
+import matplotlib.pyplot as plt
 import nemo.collections.asr as nemo_asr
 print(nemo.__version__)
 
@@ -106,6 +102,26 @@ if not os.path.exists(source_path):
 ## 📝Создаем ONNX файл (для модели Nemo FastConformer Hybrid RNNT)
 # Получение модели из виртуальной среды
 # Default cache directory
+
+# cache_dir = os.path.expanduser(MY_CONSTANTS.DOWNLOAD_CACHE_NEMO)
+# model_path = os.path.join(cache_dir, f"{MY_CONSTANTS.MODEL_TYPE_RNNT}.nemo")
+# 
+# print("Got over here")
+# 
+# # Проверяем наличие файла модели
+# if not os.path.exists(model_path):
+#     print(f"Downloading model {MY_CONSTANTS.MODEL_TYPE_RNNT}...")
+#     model = nemo_asr.models.EncDecRNNTModel.from_pretrained(
+#         model_name="stt_ru_fastconformer_hybrid_large_pc",
+#         map_location="cpu"
+#     )
+#     model.save_to(model_path)
+#     print(f"Model saved to {model_path}")
+# else:
+#     model = EncDecRNNTModel.restore_from(restore_path=model_path, map_location="cpu")
+# 
+# print("Trying")
+
 cache_dir = os.path.expanduser(MY_CONSTANTS.DOWNLOAD_CACHE_NEMO)
 model_path = os.path.join(cache_dir, f"stt_ru_fastconformer_hybrid_large_pc.nemo")
 
@@ -122,19 +138,38 @@ else:
     print(f"Файл не найден: {model_path}, будет выполнен новый запрос")
 
 print("Trying")
-# model = load_model(model_name=MY_CONSTANTS.MODEL_TYPE_RNNT,
-#                    fp16_encoder=False,
-#                    device="cpu")
-# model.to_onnx(dir_path=MY_CONSTANTS.DIRNAME)
 
+# # Загружаем модель NeMo
+# model = EncDecRNNTModel.restore_from(restore_path=model_path, map_location="cpu")
+# logging.info(f"Модель {MY_CONSTANTS.MODEL_TYPE_RNNT} успешно загружена")
+#
+# # Извлекаем вокабуляр из модели
+# vocab = list(model.decoder.vocabulary)
+# vocab_dict = {token: idx for idx, token in enumerate(vocab)}
+# blank_idx = vocab.index("<blank>")
+# max_vocab_idx = len(vocab) - 1
+#
+# # Сохраняем вокабуляр в файл
+# vocab_path = os.path.join(MY_CONSTANTS.DIRNAME, "vocab-stt_ru_fastconformer_hybrid_large_pc_RNNT.txt")
+# os.makedirs(MY_CONSTANTS.DIRNAME, exist_ok=True)
+# with open(vocab_path, "w", encoding="utf-8") as f:
+#     for token, idx in vocab_dict.items():
+#         f.write(f"{token} {idx}\n")
+# print(f"Вокабуляр сохранён в: {vocab_path}")
+
+# Экспортируем модель в ONNX
 export_nemo_to_onnx(
-        model_name="stt_ru_fastconformer_hybrid_large_pc",
-        onnx_dir="onnx_models",
-        device="cpu",
-        # decoder_type="ctc"  # Указываем RNNT
-        decoder_types=["ctc", "rnnt"]
-    )
+    model_name=MY_CONSTANTS.MODEL_TYPE_RNNT,
+    onnx_dir=MY_CONSTANTS.DIRNAME,
+    device="cpu",
+    decoder_types=["rnnt"]  # Используем только RNNT
+)
+
+# logging.info(f"Экспорт модели в ONNX завершён. Вокабуляр доступен в {vocab_path}")
 print("Hooray")
+
+from RnntASPPyTorch_DIR.RnntASPPyTorch import RnntASRPyTorch
+from RnntASPNumpy_DIR.RnntASPNumpy import RnntASRNumPy
 
 """## 🔦Пишем свою версию инференса на PyTorch"""
 
@@ -153,9 +188,52 @@ audioMONOOld = load_audio_PyTorch(audio_path=source_path,
                                   load_type="mono")
 print("Размерность audioMONOOld:", audioMONOOld.shape)
 
-audioSTEREO, original_sample_rateSTEREO = sf.read(source_path,
-                                                  dtype='float32',
-                                                  always_2d=True)
+# Загрузка аудио только через torchaudio
+audioSTEREOTorch1, original_sample_rateTorch = torchaudio.load(source_path)
+
+# Проверка формата аудио
+if audioSTEREOTorch1.dim() == 1:
+    print("Аудио МОНО, сконвертируем в СТЕРЕО формат, продублировав канал")
+    audioSTEREOTorch1 = torch.stack([audioSTEREOTorch1, audioSTEREOTorch1])
+elif audioSTEREOTorch1.dim() == 2:
+    print("Аудио уже в СТЕРЕО формате")
+else:
+    raise ValueError("Неподдерживаемое количество каналов в аудио")
+
+# Ресэмплинг, если частота не соответствует ожидаемой (16000 Гц)
+if original_sample_rateTorch != 16000:
+    print(f"Sample rate of the audio ({original_sample_rateTorch}) does not match expected (16000)")
+    audioSTEREOTorch1 = torchaudio.functional.resample(audioSTEREOTorch1, original_sample_rateTorch, 16000)
+    original_sample_rateTorch = 16000
+    print(f"Ресэмплинг выполнен с {original_sample_rateTorch} Гц до 16000 Гц")
+
+# Выбор первого канала для обработки
+if audioSTEREOTorch1.shape[0] > 1:
+    audioSTEREOTorch1 = audioSTEREOTorch1[0, :]  # Берем первый канал
+    print("Обработано стерео-аудио, выбран первый канал")
+
+# Преобразуем в numpy для дальнейшей работы
+audioSTEREO = audioSTEREOTorch1.numpy().astype(np.float32)
+print("Полученная размерность audioSTEREO:", audioSTEREO.shape)
+print(f"Диапазон значений итогового аудио (audioSTEREO): [{audioSTEREO.min()} ; {audioSTEREO.max()}]")
+# audioSTEREO, original_sample_rateSTEREO = sf.read(source_path,
+#                                                   dtype='float32',
+#                                                   always_2d=True)
+#
+# # Коррекция частоты дискретизации
+# if original_sample_rateSTEREO != 16000:
+#     audio_tensor = torch.from_numpy(audioSTEREO.T).float()  # Транспонируем для torchaudio
+#     audioSTEREO = torchaudio.functional.resample(audio_tensor, original_sample_rateSTEREO, 16000).numpy().T
+#     original_sample_rateSTEREO = 16000
+#     print(f"Ресэмплинг выполнен с {original_sample_rateSTEREO} Гц до 16000 Гц")
+#
+# # Обработка стерео: выбор первого канала для теста
+# if audioSTEREO.shape[1] > 1:
+#     audioSTEREO = audioSTEREO[:, 0]  # Используем только первый канал
+#     print("Обработано стерео-аудио, выбран первый канал")
+
+print("Полученная размерность audioSTEREO:", audioSTEREO.shape)
+print(f"Диапазон значений итогового аудио (audioSTEREO): [{audioSTEREO.min()} ; {audioSTEREO.max()}]")
 
 # Загрузка с помощью torchaudio
 audioSTEREOTorch, original_sample_rateTorch = torchaudio.load(source_path)
@@ -168,14 +246,14 @@ else:
     raise ValueError("Неподдерживаемое количество каналов в аудио")
 
 # Resampling для audioSTEREO
-if original_sample_rateSTEREO != MY_CONSTANTS.SAMPLE_RATE:
-    print(f"Sample rate of the audio ({original_sample_rateSTEREO}) does not match expected ({MY_CONSTANTS.SAMPLE_RATE})")
-    audio_tensor = torch.from_numpy(audioSTEREO).float()
-    audio_tensor = audio_tensor.transpose(0, 1)  # [samples, channels] -> [channels, samples]
-    audio_tensor = F.resample(audio_tensor, original_sample_rateSTEREO, MY_CONSTANTS.SAMPLE_RATE)
-    audioSTEREO = audio_tensor.transpose(0, 1).numpy()  # [channels, samples] -> [samples, channels]
-print("Полученная размерность audioSTEREO:", audioSTEREO.shape)
-print(f"Диапазон значений итогового аудио (audioSTEREO): [{audioSTEREO.min()} ; {audioSTEREO.max()}]")
+# if original_sample_rateSTEREO != MY_CONSTANTS.SAMPLE_RATE:
+#     print(f"Sample rate of the audio ({original_sample_rateSTEREO}) does not match expected ({MY_CONSTANTS.SAMPLE_RATE})")
+#     audio_tensor = torch.from_numpy(audioSTEREO).float()
+#     audio_tensor = audio_tensor.transpose(0, 1)  # [samples, channels] -> [channels, samples]
+#     audio_tensor = F.resample(audio_tensor, original_sample_rateSTEREO, MY_CONSTANTS.SAMPLE_RATE)
+#     audioSTEREO = audio_tensor.transpose(0, 1).numpy()  # [channels, samples] -> [samples, channels]
+# print("Полученная размерность audioSTEREO:", audioSTEREO.shape)
+# print(f"Диапазон значений итогового аудио (audioSTEREO): [{audioSTEREO.min()} ; {audioSTEREO.max()}]")
 
 # Resampling для audioMONO
 if original_sample_rateMONO != MY_CONSTANTS.SAMPLE_RATE:
@@ -708,35 +786,50 @@ transcriptionGD_NumPy, metricsGD_NumPy = preprocessor_NumPy.recognize(
 rnnt_model = RnntASRPyTorch(
     encoder_path="onnx_models/encoder-stt_ru_fastconformer_hybrid_large_pc_RNNT.onnx",
     decoder_joint_path="onnx_models/decoder_joint-stt_ru_fastconformer_hybrid_large_pc_RNNT.onnx",
-    features=80  # Update this to match the model's expectation
+    features=80
 )
 
-# RNN-T декодирование
+waveform, sr = torchaudio.load("audio_files/20250404_174500.wav")
+print(f"Waveform shape: {waveform.shape}, sample rate: {sr}")
+if sr != 16000:
+    resampler = torchaudio.transforms.Resample(sr, 16000)
+    waveform = resampler(waveform)
+    print(f"Resampled waveform shape: {waveform.shape}")
+
+plt.figure(figsize=(10, 4))
+plt.plot(waveform[0].numpy())
+plt.title("Waveform")
+plt.xlabel("Sample")
+plt.ylabel("Amplitude")
+plt.tight_layout()
+plt.show()
+
+ground_truth = "мне необходимо вам рассказать следующую историю о своей жизни чем четче я говорю тем лучший результат я получу"
 transcription_rnnt_gd = rnnt_model.recognize(
-    audioSTEREO,
+    waveform.numpy(),
     decode_flag="GD",
     ground_truth=ground_truth,
-    max_steps=500,
-    min_tokens=150
-    # max_tokens_per_time_step=10
+    max_steps=1000,
+    min_tokens=30
 )
+print("Транскрипция жадного декодирования (RNN-T PyTorch):", transcription_rnnt_gd)
 
+beam_widths = [5, 10, 15]
 for beam_width in beam_widths:
-    for lp in [0.1, 0.3, 0.5, 1.0]:
+    for lp in [0.3, 0.7, 1.0, 1.5]:
         print(f"\nТестирование RNN-T: beam_width={beam_width}, length_penalty={lp}")
-        time.sleep(5)  # Задержка 5 секунд
         transcription = rnnt_model.recognize(
-            waveforms=audioSTEREO,
-            decode_flag="BS",  # Используем декодирование по лучу
-            beam_width=beam_width,  # Передаем текущий beam_width
-            length_penalty=lp,  # Передаем текущий length_penalty
+            waveforms=waveform.numpy(),
+            decode_flag="BS",
+            beam_width=beam_width,
+            length_penalty=lp,
             ground_truth=ground_truth,
-            max_steps=5000,
-            min_tokens=150  # Передаем min_tokens
+            max_steps=2000,
+            min_tokens=20
         )
         print(f"Транскрипция: {transcription}")
 
-print("Транскрипция жадного декодирования (RNN-T PyTorch):", transcription_rnnt_gd)
+
 print("Транскрипция декодирования по лучу (RNN-T PyTorch):", transcription)
 
 preprocessor_Rnnt_NumPy = RnntASRNumPy(
