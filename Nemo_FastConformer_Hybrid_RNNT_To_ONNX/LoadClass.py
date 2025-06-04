@@ -5,16 +5,15 @@ from tqdm import tqdm
 import tempfile
 import json
 import logging
-from Constants import Constants, _MODEL_NAMES
+from Constants import Constants
 
 # Установите временную директорию на диск E:
 os.environ['TEMP'] = 'E:/temp'
 os.environ['TMP'] = 'E:/temp'
 tempfile.tempdir = 'E:/temp'
-import torch
+
 import nemo.collections.asr as nemo_asr
 from typing import Tuple, Optional, List
-
 
 # Аналог MY_CONSTANTS для NeMo
 class NeMoConstants:
@@ -23,10 +22,8 @@ class NeMoConstants:
     DIRNAME = "onnx_models"
     _URL_DIR = "https://huggingface.co/nvidia/stt_ru_fastconformer_hybrid_large_pc/resolve/main/stt_ru_fastconformer_hybrid_large_pc.nemo"
 
-
 NEMO_CONSTANTS = NeMoConstants()
 MY_CONSTANTS = Constants()
-
 
 # Аналог _download_file
 def _download_file(file_url: str, file_path: str) -> str:
@@ -51,13 +48,11 @@ def _download_file(file_url: str, file_path: str) -> str:
                 loop.update(len(buffer))
     return file_path
 
-
 # Аналог _download_model для NeMo
 def _download_model(model_name: str, download_root: str) -> Tuple[str, str]:
     model_url = f"{NEMO_CONSTANTS._URL_DIR}"
     model_path = os.path.join(download_root, f"{model_name}.nemo")
     return model_name, _download_file(model_url, model_path)
-
 
 # Аналог load_model для NeMo
 def load_nemo_model(model_name: str, device: str = "cpu",
@@ -87,14 +82,12 @@ def load_nemo_model(model_name: str, device: str = "cpu",
 
     # Загружаем модель
     try:
-        model = nemo_asr.models.ASRModel.restore_from(model_path, map_location=device)
+        model = nemo_asr.models.ASRModel.from_pretrained(f"nvidia/{model_name}")
         logging.info(f"Модель {model_name} успешно загружена")
     except Exception as e:
         print(f"Ошибка при загрузке модели из файла: {e}")
-        os.remove(model_path)
         raise
     return model.to(device)
-
 
 def export_nemo_to_onnx(
         model_name: str = NEMO_CONSTANTS.MODEL_TYPE,
@@ -114,24 +107,64 @@ def export_nemo_to_onnx(
     # Загружаем модель
     model = load_nemo_model(model_name=model_name, device=device, download_root=download_root)
 
-    # Извлекаем параметры препроцессора
-    preprocessor = model.preprocessor
+    # Определяем дефолтные значения из AudioToMelSpectrogramPreprocessor
+    default_preprocessor_params = {
+        "sample_rate": 16000,
+        "window_size": 0.02,
+        "window_stride": 0.01,
+        "n_window_size": None,
+        "n_window_stride": None,
+        "window": "hann",
+        "normalize": "per_feature",
+        "n_fft": None,
+        "preemph": 0.97,
+        "features": 64,
+        "lowfreq": 0,
+        "highfreq": None,
+        "log": True,
+        "log_zero_guard_type": "add",
+        "log_zero_guard_value": 2**-24,
+        "dither": 1e-5,
+        "pad_to": 16,
+        "frame_splicing": 1,
+        "exact_pad": False,
+        "pad_value": 0,
+        "mag_power": 2.0,
+        "rng": None,
+        "nb_augmentation_prob": 0.0,
+        "nb_max_freq": 4000,
+        "use_torchaudio": False,
+        "mel_norm": "slaney",
+        "stft_exact_pad": False,
+        "stft_conv": False
+    }
+
+    # Извлекаем параметры препроцессора из конфигурации модели
     preprocessor_params = {}
-    possible_params = [
-        "sample_rate", "window_size", "window_stride", "window", "features", "n_fft",
-        "frame_splicing", "dither", "pad_to", "normalize", "log", "log_zero_guard_value"
-    ]
-    for param in possible_params:
-        if hasattr(preprocessor, param):
-            preprocessor_params[param] = getattr(preprocessor, param)
-    if hasattr(preprocessor, "cfg"):
-        preprocessor_params["cfg"] = dict(preprocessor.cfg)
+    if hasattr(model, "cfg") and hasattr(model.cfg, "preprocessor"):
+        print("\nПараметры препроцессора из model.cfg.preprocessor:")
+        cfg_preprocessor = dict(model.cfg.preprocessor)
+        # Список всех возможных параметров на основе дефолтов AudioToMelSpectrogramPreprocessor
+        expected_params = list(default_preprocessor_params.keys())
+        for param in expected_params:
+            if param in cfg_preprocessor:
+                value = cfg_preprocessor[param]
+                preprocessor_params[param] = value
+                print(f"{param}: {value}")
+            else:
+                # Используем дефолтное значение, если параметр не указан
+                value = default_preprocessor_params[param]
+                preprocessor_params[param] = value
+                print(f"{param}: {value} (дефолтное значение)")
+    else:
+        print("\nПараметры препроцессора из model.cfg.preprocessor: (не доступны)")
+        raise AttributeError("Model configuration or preprocessor config not found")
 
     # Сохраняем параметры препроцессора в JSON
     params_path = onnx_dir / f"preprocessor_params_{model_name}.json"
     with open(params_path, "w", encoding="utf-8") as f:
         json.dump(preprocessor_params, f, indent=4, ensure_ascii=False)
-    print(f"Параметры препроцессора сохранены в: {params_path}")
+    print(f"\nПараметры препроцессора сохранены в: {params_path}")
 
     # Извлекаем и сохраняем вокабуляр
     if hasattr(model, "tokenizer"):
