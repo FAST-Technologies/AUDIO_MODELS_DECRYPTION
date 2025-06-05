@@ -94,6 +94,8 @@ class RnntASRPyTorch(nn.Module):
         self.blk_idx = BLK_IDX
         self.pad_idx = PAD_IDX
         self.max_vocab_idx = MAX_VOCAB_IDX
+        self.true_blank_idx = VOCAB.index("<blk>")
+        self.unk_idx = VOCAB.index("<unk>")
 
         self._encoder = rt.InferenceSession(encoder_path, providers=["CPUExecutionProvider"])
         self._decoder_joint = rt.InferenceSession(decoder_joint_path, providers=["CPUExecutionProvider"])
@@ -187,378 +189,6 @@ class RnntASRPyTorch(nn.Module):
         print(f"Raw logits min: {logits.min()}, max: {logits.max()}")
         logits = logits - np.max(logits)  # Stabilize logits
         return logits, (outputs[1], outputs[2])
-
-    def decode_rnnt_greedy(self,
-                           encoder_output: np.ndarray,
-                           vocab: List[str],
-                           blank_idx: int,
-                           max_vocab_idx: int,
-                           ground_truth: str = None,
-                           max_steps: int = 1000,
-                           min_tokens: int = 10,
-                           max_tokens_per_step: int = 10,
-                           state_init: str = "zero") -> Tuple[str, Dict[str, float], List[int]]:
-        if encoder_output.shape[0] != 1:
-            raise ValueError(f"Expected batch_size=1, got {encoder_output.shape[0]}")
-
-        batch_size, hidden_size, time_frames = encoder_output.shape
-        if state_init == "random":
-            state1 = np.random.normal(0, 0.01, (1, 1, self.hidden_size)).astype(np.float32)
-            state2 = np.random.normal(0, 0.01, (1, 1, self.hidden_size)).astype(np.float32)
-        else:
-            state1 = np.zeros((1, 1, self.hidden_size), dtype=np.float32)
-            state2 = np.zeros((1, 1, self.hidden_size), dtype=np.float32)
-
-        start_token = self.vocab.index("▁") if "▁" in self.vocab else 0
-        prev_token = np.array([[start_token]], dtype=np.int32)
-
-        decoded_ids = []
-        timestamps = []
-        step = 0
-        consecutive_blanks = 0
-        emitted_count = 0
-
-        # Отслеживание последних токенов для предотвращения циклов
-        recent_tokens = []
-        max_recent = 8  # Увеличили окно отслеживания
-
-        # Отслеживание частоты токенов
-        token_frequency = {}
-
-        # Отслеживание последних эмитированных слов (для предотвращения дублирования слов)
-        word_buffer = []
-        current_word_tokens = []
-
-        # Настройки декодирования
-        base_temperature = 0.9
-        min_temperature = 0.6
-        base_blank_penalty = -1.8
-
-        # Счетчики для адаптивного поведения
-        useful_steps = 0
-        last_useful_step = 0
-        stagnation_threshold = 25
-
-        print(f"Starting enhanced greedy decoding with {time_frames} time frames")
-
-        while step < time_frames and step < max_steps:
-            logits, (state1, state2) = self.decode_step(encoder_output, prev_token, (state1, state2), step)
-
-            if logits.size == 0:
-                print(f"Empty logits at step {step}, breaking")
-                break
-
-            logits = logits[0, 0, 0]  # [vocab_size]
-
-            # Адаптивная температура
-            progress = step / min(time_frames, max_steps)
-            stagnation_factor = min(1.5, 1.0 + (step - last_useful_step) / stagnation_threshold)
-            temperature = max(min_temperature, base_temperature - progress * 0.2) * stagnation_factor
-
-            # Динамический штраф за blank
-            blank_penalty = base_blank_penalty
-            if consecutive_blanks > 2:
-                blank_penalty -= (consecutive_blanks - 2) * 0.8
-            elif consecutive_blanks == 0 and emitted_count > 0:
-                blank_penalty += 0.3  # Небольшой бонус после эмиссии
-
-            logits[blank_idx] += blank_penalty
-
-            # Штрафы за специальные токены
-            if self.blk_idx < len(logits):
-                logits[self.blk_idx] -= 8.0
-            if self.pad_idx < len(logits):
-                logits[self.pad_idx] -= 8.0
-
-            # Применяем температуру и стабилизируем
-            scaled_logits = logits / temperature
-            scaled_logits = scaled_logits - np.max(scaled_logits)
-
-            # Вычисляем базовые вероятности
-            exp_logits = np.exp(scaled_logits)
-            probs = exp_logits / (np.sum(exp_logits) + 1e-12)
-
-            # === СИСТЕМА ШТРАФОВ ===
-
-            # 1. Штраф за недавние токены (предотвращение коротких повторений)
-            for i, recent_token in enumerate(recent_tokens):
-                if recent_token < len(probs):
-                    # Штраф убывает с расстоянием, но остается значительным
-                    distance_weight = (max_recent - i) / max_recent
-                    penalty = -2.0 * distance_weight
-                    probs[recent_token] = probs[recent_token] * np.exp(penalty)
-
-            # 2. Прогрессивный штраф за частоту использования
-            for token_id, freq in token_frequency.items():
-                if token_id < len(probs) and freq >= 2:
-                    # Экспоненциально растущий штраф
-                    frequency_penalty = -0.8 * (freq - 1) ** 1.2
-                    probs[token_id] = probs[token_id] * np.exp(frequency_penalty)
-
-            # 3. Предотвращение повторения частей слов
-            if len(current_word_tokens) > 0:
-                last_token_in_word = current_word_tokens[-1]
-                if last_token_in_word < len(probs):
-                    # Штраф за повторение последнего токена в текущем слове
-                    probs[last_token_in_word] = probs[last_token_in_word] * np.exp(-1.5)
-
-            # 4. Предотвращение дублирования слов
-            if len(word_buffer) > 0 and len(current_word_tokens) > 0:
-                # Проверяем, не начинаем ли мы повторять предыдущее слово
-                for prev_word_tokens in word_buffer[-2:]:  # Проверяем последние 2 слова
-                    if len(current_word_tokens) < len(prev_word_tokens):
-                        expected_next = prev_word_tokens[len(current_word_tokens)]
-                        if expected_next < len(probs):
-                            # Если текущие токены совпадают с началом предыдущего слова
-                            if current_word_tokens == prev_word_tokens[:len(current_word_tokens)]:
-                                probs[expected_next] = probs[expected_next] * np.exp(-3.0)
-
-            # Нормализация после штрафов
-            probs = np.clip(probs, 1e-12, 1.0)
-            probs = probs / np.sum(probs)
-
-            # === ВЫБОР ТОКЕНА ===
-
-            # Используем комбинированную стратегию: top-k с адаптивным k
-            max_prob = np.max(probs)
-            confidence = max_prob
-
-            if confidence > 0.7:
-                # Высокая уверенность - выбираем лучший
-                token_idx = np.argmax(probs)
-            elif confidence > 0.3:
-                # Средняя уверенность - top-3
-                k = 3
-                top_k_indices = np.argpartition(probs, -k)[-k:]
-                top_k_probs = probs[top_k_indices]
-                top_k_probs = top_k_probs / np.sum(top_k_probs)
-
-                # Предпочитаем лучший, но допускаем некоторую случайность
-                if np.random.random() < 0.7:
-                    selected_idx = np.argmax(top_k_probs)
-                else:
-                    selected_idx = np.random.choice(len(top_k_probs), p=top_k_probs)
-                token_idx = top_k_indices[selected_idx]
-            else:
-                # Низкая уверенность - top-5 с семплированием
-                k = 5
-                top_k_indices = np.argpartition(probs, -k)[-k:]
-                top_k_probs = probs[top_k_indices]
-                top_k_probs = top_k_probs / np.sum(top_k_probs)
-                selected_idx = np.random.choice(len(top_k_probs), p=top_k_probs)
-                token_idx = top_k_indices[selected_idx]
-
-            # Логирование
-            if step % 30 == 0:
-                token_str = self.vocab[token_idx] if token_idx < len(self.vocab) else 'UNK'
-                print(f"Step {step}: token='{token_str}', prob={probs[token_idx]:.4f}, "
-                      f"temp={temperature:.2f}, conf={confidence:.3f}, blanks={consecutive_blanks}")
-
-            # === ОБРАБОТКА ВЫБРАННОГО ТОКЕНА ===
-
-            if token_idx == blank_idx or token_idx == self.blk_idx or token_idx == self.pad_idx or token_idx > max_vocab_idx:
-                # Blank токен
-                consecutive_blanks += 1
-                prev_token = np.array([[blank_idx]], dtype=np.int32)
-
-                # Принудительная эмиссия при застое
-                if consecutive_blanks > 6 and (step - last_useful_step) > stagnation_threshold:
-                    print(f"Forcing emission due to stagnation (blanks={consecutive_blanks})")
-
-                    # Создаем маску для исключения проблемных токенов
-                    forced_probs = probs.copy()
-                    forced_probs[blank_idx] = 0
-                    forced_probs[self.blk_idx] = 0
-                    forced_probs[self.pad_idx] = 0
-
-                    # Исключаем недавние токены
-                    for recent_token in recent_tokens[-3:]:
-                        if recent_token < len(forced_probs):
-                            forced_probs[recent_token] = 0
-
-                    if np.sum(forced_probs) > 0:
-                        forced_probs = forced_probs / np.sum(forced_probs)
-                        token_idx = np.argmax(forced_probs)
-
-                        # Принудительно эмитим токен
-                        decoded_ids.append(token_idx)
-                        timestamps.append(step)
-                        token_frequency[token_idx] = token_frequency.get(token_idx, 0) + 1
-
-                        # Обновляем состояния
-                        recent_tokens.append(token_idx)
-                        if len(recent_tokens) > max_recent:
-                            recent_tokens.pop(0)
-
-                        token_str = self.vocab[token_idx] if token_idx < len(self.vocab) else 'UNK'
-
-                        # Управление словами
-                        if token_str.startswith('▁') and current_word_tokens:
-                            # Заканчиваем предыдущее слово
-                            word_buffer.append(current_word_tokens.copy())
-                            if len(word_buffer) > 5:  # Ограничиваем буфер слов
-                                word_buffer.pop(0)
-                            current_word_tokens = [token_idx]
-                        else:
-                            current_word_tokens.append(token_idx)
-
-                        prev_token = np.array([[token_idx]], dtype=np.int32)
-                        consecutive_blanks = 0
-                        emitted_count += 1
-                        useful_steps += 1
-                        last_useful_step = step
-                        print(f"Forced emission: '{token_str}'")
-            else:
-                # Не-blank токен - проверяем на валидность
-                should_emit = True
-                token_str = self.vocab[token_idx] if token_idx < len(self.vocab) else 'UNK'
-
-                # Дополнительная проверка на циклы
-                if len(recent_tokens) >= 2 and token_idx in recent_tokens[-2:]:
-                    print(f"Rejecting immediate repetition: '{token_str}'")
-                    should_emit = False
-
-                # Проверка на дублирование частей слов
-                elif len(current_word_tokens) > 2 and token_idx in current_word_tokens[-3:]:
-                    print(f"Rejecting token repetition within word: '{token_str}'")
-                    should_emit = False
-
-                if should_emit:
-                    decoded_ids.append(token_idx)
-                    timestamps.append(step)
-                    token_frequency[token_idx] = token_frequency.get(token_idx, 0) + 1
-
-                    # Обновляем recent_tokens
-                    recent_tokens.append(token_idx)
-                    if len(recent_tokens) > max_recent:
-                        recent_tokens.pop(0)
-
-                    # Управление словами
-                    if token_str.startswith('▁') and current_word_tokens:
-                        # Заканчиваем предыдущее слово и начинаем новое
-                        word_buffer.append(current_word_tokens.copy())
-                        if len(word_buffer) > 5:
-                            word_buffer.pop(0)
-                        current_word_tokens = [token_idx]
-                    else:
-                        current_word_tokens.append(token_idx)
-
-                    prev_token = np.array([[token_idx]], dtype=np.int32)
-                    emitted_count += 1
-                    useful_steps += 1
-                    last_useful_step = step
-                else:
-                    # Отклоняем токен, переходим к blank
-                    prev_token = np.array([[blank_idx]], dtype=np.int32)
-
-                consecutive_blanks = 0
-
-            step += 1
-
-            # === УСЛОВИЯ ОСТАНОВКИ ===
-
-            completion_ratio = step / time_frames if time_frames > 0 else 1.0
-
-            # Останавливаемся при достижении целей
-            if emitted_count >= min_tokens:
-                if completion_ratio >= 0.95:
-                    print(f"Stopping: sufficient progress (tokens={emitted_count}, completion={completion_ratio:.2f})")
-                    break
-                elif emitted_count >= time_frames * 1.2:
-                    print(f"Stopping: sufficient tokens ({emitted_count}) for {time_frames} frames")
-                    break
-
-            # Аварийный выход при длительном застое
-            if (step - last_useful_step) > stagnation_threshold * 2:
-                print(f"Stopping: prolonged stagnation ({step - last_useful_step} steps)")
-                break
-
-        # === ПОСТОБРАБОТКА ===
-
-        # Добавляем последнее слово в буфер если есть
-        if current_word_tokens:
-            word_buffer.append(current_word_tokens)
-
-        # Базовая фильтрация токенов
-        tokens = []
-        for tok in decoded_ids:
-            if tok < len(self.vocab) and tok != self.blk_idx and tok != self.pad_idx:
-                tokens.append(self.vocab[tok])
-
-        # Улучшенная постобработка на уровне токенов
-        cleaned_tokens = []
-        i = 0
-        while i < len(tokens):
-            token = tokens[i]
-
-            # Пропускаем пустые и мусорные токены
-            if not token.strip() or token.strip() in ['ь', 'Ь', '▁']:
-                i += 1
-                continue
-
-            # Проверяем на дублирование соседних токенов
-            if i < len(tokens) - 1 and token == tokens[i + 1]:
-                cleaned_tokens.append(token)
-                i += 2  # Пропускаем дубликат
-                continue
-
-            cleaned_tokens.append(token)
-            i += 1
-
-        # Собираем текст
-        text = "".join(cleaned_tokens)
-        text = text.replace("▁", " ")
-
-        # Постобработка текста
-        # 1. Убираем повторяющиеся символы (больше 2 подряд)
-        text = re.sub(r'(.)\1{2,}', r'\1', text)
-
-        # 2. Убираем дублирование слов
-        words = text.split()
-        cleaned_words = []
-        i = 0
-        while i < len(words):
-            word = words[i].strip()
-            if not word:
-                i += 1
-                continue
-
-            # Проверяем на дублирование соседних слов
-            if i < len(words) - 1 and word.lower() == words[i + 1].strip().lower() and len(word) > 1:
-                cleaned_words.append(word)
-                i += 2  # Пропускаем дубликат
-            else:
-                cleaned_words.append(word)
-                i += 1
-
-        text = " ".join(cleaned_words)
-
-        # 3. Убираем множественные пробелы и очищаем
-        text = re.sub(r'\s+', ' ', text).strip()
-
-        # 4. Убираем неполные слова в конце (менее 2 символов)
-        words = text.split()
-        while words and len(words[-1].strip()) < 2:
-            words.pop()
-        text = " ".join(words)
-
-        print(f"Final transcription (Enhanced Greedy): '{text}'")
-        print(f"Total tokens generated: {len(decoded_ids)}")
-        print(f"Unique tokens: {len(set(decoded_ids))}")
-        print(f"Words detected: {len(word_buffer)}")
-        print(f"Useful steps ratio: {useful_steps}/{step} = {useful_steps / step:.2f}")
-        print(f"Top token frequencies: {sorted(token_frequency.items(), key=lambda x: x[1], reverse=True)[:5]}")
-
-        # Вычисляем метрики
-        metrics = {}
-        if ground_truth and text:
-            metrics = return_metrics(transcription=text,
-                                     ground_truth=ground_truth,
-                                     metrics=metrics,
-                                     total_log_prob=0.0,
-                                     flag="enhanced_greedy")
-
-        return text, metrics, timestamps
 
     def decode_rnnt_beam_search(self,
                                 encoder_output: np.ndarray,
@@ -656,23 +286,19 @@ class RnntASRPyTorch(nn.Module):
     def decode_rnnt_greedy_improved(self,
                                     encoder_output: np.ndarray,
                                     vocab: List[str],
-                                    blank_idx: int,
+                                    blank_idx: int,  # Это будет self.true_blank_idx (e.g., 1024)
                                     max_vocab_idx: int,
                                     ground_truth: str = None,
-                                    max_steps: int = 1000,
-                                    min_tokens: int = 10,
-                                    max_tokens_per_step: int = 10,
+                                    max_steps: int = 1000,  # Этот max_steps может быть не главным ограничителем
+                                    min_tokens: int = 10,  # Не используется активно для останова
+                                    max_tokens_per_step: int = 10,  # Не используется
                                     state_init: str = "zero") -> Tuple[str, Dict[str, float], List[int]]:
-        """
-        Улучшенное жадное декодирование с более стабильным поведением
-        """
         if encoder_output.shape[0] != 1:
             raise ValueError(f"Expected batch_size=1, got {encoder_output.shape[0]}")
 
         batch_size, hidden_size, time_frames = encoder_output.shape
-        print(f"Starting fixed greedy decoding with {time_frames} time frames")
+        print(f"Starting fixed greedy decoding with {time_frames} time frames, true_blank_idx={blank_idx}")
 
-        # Инициализация состояний
         if state_init == "random":
             state1 = np.random.normal(0, 0.01, (1, 1, self.hidden_size)).astype(np.float32)
             state2 = np.random.normal(0, 0.01, (1, 1, self.hidden_size)).astype(np.float32)
@@ -680,173 +306,138 @@ class RnntASRPyTorch(nn.Module):
             state1 = np.zeros((1, 1, self.hidden_size), dtype=np.float32)
             state2 = np.zeros((1, 1, self.hidden_size), dtype=np.float32)
 
-        # Начальный токен
-        start_token = self.vocab.index("▁") if "▁" in self.vocab else 0
-        prev_token = np.array([[start_token]], dtype=np.int32)
+        # Начальный токен - ИСПОЛЬЗУЕМ ИСТИННЫЙ BLANK_IDX
+        prev_token = np.array([[blank_idx]], dtype=np.int32)
 
-        # Результаты декодирования
         decoded_ids = []
         timestamps = []
-
-        # Счетчики и состояние
         step = 0
         consecutive_blanks = 0
         emitted_count = 0
 
-        # Простое отслеживание повторений
-        last_token = None
+        last_emitted_token_idx = -1  # Для отслеживания повторений эмитированных не-blank токенов
         repeat_count = 0
 
-        # Настройки декодирования
-        temperature = 0.7  # Фиксированная температура
-        blank_penalty = -1.5  # Умеренный штраф за blank
+        temperature = 1.0  # Попробуйте 1.0 для "чистого" жадного или немного выше/ниже
+        blank_penalty_val = -1.5
 
-        print(f"Starting improved greedy decoding with {time_frames} time frames")
+        # Цикл будет идти максимум time_frames шагов (соответствует каждому кадру энкодера)
+        # max_steps из параметров функции может быть дополнительным ограничителем, если он меньше time_frames
+        actual_max_steps = min(time_frames, max_steps)
+        last_emitted_non_blank_token_for_penalty = -1
 
-        while step < time_frames:
+        while step < actual_max_steps:
             try:
-                logits, (state1, state2) = self.decode_step(encoder_output, prev_token,
-                                                            (state1, state2), step)
+                logits_orig, (state1, state2) = self.decode_step(encoder_output, prev_token, (state1, state2), step)
 
-                if logits.size == 0:
+                if logits_orig.size == 0:
                     print(f"Empty logits at step {step}, moving to next step")
                     step += 1
                     continue
 
-                logits = logits[0, 0, 0]  # [vocab_size]
+                logits = logits_orig[0, 0, 0].copy()
+                logits[blank_idx] += blank_penalty_val
 
-                # Базовые штрафы
-                logits[blank_idx] += blank_penalty
-
-                # Штрафы за служебные токены
-                if self.blk_idx < len(logits):
-                    logits[self.blk_idx] -= 5.0
-                if self.pad_idx < len(logits):
+                if self.pad_idx != blank_idx and self.pad_idx < len(logits):
                     logits[self.pad_idx] -= 5.0
+                if 0 != blank_idx and 0 < len(logits):
+                    logits[0] -= 2.0
 
-                # Штраф за токены вне словаря
                 for i in range(max_vocab_idx + 1, len(logits)):
                     logits[i] -= 5.0
 
-                # Применяем температуру
-                scaled_logits = logits / temperature
-                scaled_logits = scaled_logits - np.max(scaled_logits)  # Стабилизация
+                if temperature != 1.0:
+                    scaled_logits = logits / temperature
+                else:
+                    scaled_logits = logits
 
-                # Вычисляем вероятности
+                scaled_logits = scaled_logits - np.max(scaled_logits)
                 exp_logits = np.exp(scaled_logits)
                 probs = exp_logits / (np.sum(exp_logits) + 1e-12)
 
-                # Простое предотвращение повторений
-                if last_token is not None and last_token < len(probs) and repeat_count >= 2:
-                    probs[last_token] *= 0.1  # Сильно уменьшаем вероятность
+                # Контроль повторений
+                last_two_tokens = [last_emitted_token_idx] if last_emitted_token_idx != -1 else []
+                if last_emitted_token_idx != -1 and token_idx == last_emitted_token_idx:
+                    repeat_count += 1
+                else:
+                    repeat_count = 0
 
-                # Нормализуем
-                probs = probs / np.sum(probs)
+                if repeat_count >= 1:
+                    print(f"Applying repetition penalty for token {self.vocab[token_idx]}")
+                    probs[token_idx] *= 0.05
+                    probs = probs / np.sum(probs)
+                    token_idx = np.argmax(probs)
 
-                # Выбираем токен - жадно
                 token_idx = np.argmax(probs)
+                if probs[token_idx] < 0.6:
+                    print(
+                        f"Low confidence for token {self.vocab[token_idx]} (prob={probs[token_idx]:.4f}), emitting blank")
+                    token_idx = blank_idx
 
-                # Логирование
                 if step % 50 == 0:
-                    token_str = self.vocab[token_idx] if token_idx < len(self.vocab) else 'UNK'
-                    print(f"Step {step}/{time_frames}: token='{token_str}', prob={probs[token_idx]:.4f}, "
-                          f"temp={temperature:.3f}, blanks={consecutive_blanks}, emitted={emitted_count}")
+                    token_str = self.vocab[token_idx] if token_idx < len(self.vocab) else 'OUT_OF_VOCAB'
+                    print(
+                        f"Step {step}/{actual_max_steps}: chosen='{token_str}' ({token_idx}), prob={probs[token_idx]:.4f}, "
+                        f"blanks={consecutive_blanks}, emitted={emitted_count}, repeat_count={repeat_count}")
 
-                # Обработка токена
-                if (token_idx == blank_idx or token_idx == self.blk_idx or
-                        token_idx == self.pad_idx or token_idx > max_vocab_idx):
-                    # Blank токен
+                is_blank_equivalent = (token_idx == blank_idx or
+                                       (token_idx == self.pad_idx and self.pad_idx != blank_idx) or
+                                       token_idx > max_vocab_idx)
+
+                if is_blank_equivalent:
                     consecutive_blanks += 1
                     prev_token = np.array([[blank_idx]], dtype=np.int32)
 
-                    # Сброс счетчика повторений
-                    if token_idx != last_token:
-                        repeat_count = 0
-                        last_token = token_idx
-
-                    # Принудительное завершение при застое
-                    if consecutive_blanks > 15:
-                        print(f"Too many consecutive blanks ({consecutive_blanks}), "
-                              f"trying to emit non-blank")
-
-                        # Находим лучший не-blank токен
+                    if consecutive_blanks > 8:
+                        print(f"Too many consecutive blanks ({consecutive_blanks}), forcing non-blank emission")
                         non_blank_probs = probs.copy()
                         non_blank_probs[blank_idx] = 0
-                        non_blank_probs[self.blk_idx] = 0
-                        non_blank_probs[self.pad_idx] = 0
-
-                        # Исключаем токены вне словаря
-                        for i in range(max_vocab_idx + 1, len(non_blank_probs)):
-                            non_blank_probs[i] = 0
-
+                        for recent_token in last_two_tokens:
+                            if recent_token < len(non_blank_probs):
+                                non_blank_probs[recent_token] = 0
                         if np.sum(non_blank_probs) > 0:
                             non_blank_probs = non_blank_probs / np.sum(non_blank_probs)
-                            forced_token = np.argmax(non_blank_probs)
-
-                            # Эмитим принудительный токен
-                            decoded_ids.append(forced_token)
+                            token_idx = np.argmax(non_blank_probs)
+                            decoded_ids.append(token_idx)
                             timestamps.append(step)
-                            prev_token = np.array([[forced_token]], dtype=np.int32)
-
-                            consecutive_blanks = 0
+                            prev_token = np.array([[token_idx]], dtype=np.int32)
                             emitted_count += 1
-                            last_token = forced_token
-                            repeat_count = 0
-
-                            token_str = self.vocab[forced_token] if forced_token < len(self.vocab) else 'UNK'
-                            print(f"Forced emission: '{token_str}'")
-
+                            consecutive_blanks = 0
+                            last_emitted_token_idx = token_idx
+                            last_emitted_non_blank_token_for_penalty = token_idx
                 else:
-                    # Валидный не-blank токен
-                    should_emit = True
-
-                    # Проверка на чрезмерные повторения
-                    if token_idx == last_token:
+                    if token_idx == last_emitted_token_idx:
                         repeat_count += 1
-                        if repeat_count > 3:  # Максимум 3 повторения подряд
-                            should_emit = False
-                            print(f"Skipping excessive repetition of token {token_idx}")
                     else:
                         repeat_count = 0
+                    last_emitted_token_idx = token_idx
 
-                    if should_emit:
-                        decoded_ids.append(token_idx)
-                        timestamps.append(step)
-                        prev_token = np.array([[token_idx]], dtype=np.int32)
-                        emitted_count += 1
-                        last_token = token_idx
-                    else:
-                        # Переходим к blank вместо повторения
-                        prev_token = np.array([[blank_idx]], dtype=np.int32)
+                    if repeat_count >= 1:
+                        print(f"Applying repetition penalty for token {self.vocab[token_idx]}")
+                        probs[token_idx] *= 0.05
+                        probs = probs / np.sum(probs)
+                        token_idx = np.argmax(probs)
 
+                    decoded_ids.append(token_idx)
+                    timestamps.append(step)
+                    prev_token = np.array([[token_idx]], dtype=np.int32)
+                    emitted_count += 1
                     consecutive_blanks = 0
+                    last_emitted_non_blank_token_for_penalty = token_idx
 
                 step += 1
-
-                # Условия остановки
-                if emitted_count >= min_tokens:
-                    progress = step / time_frames if time_frames > 0 else 1.0
-                    if progress > 0.9:  # Обработали 90% кадров
-                        print(f"Stopping: sufficient progress (tokens={emitted_count}, "
-                              f"progress={progress:.2f})")
-                        break
-
-                # Аварийный выход
-                if emitted_count > time_frames * 1.5:
-                    print(f"Stopping: too many tokens ({emitted_count}) for {time_frames} frames")
-                    break
 
             except Exception as e:
                 print(f"Error at step {step}: {e}")
                 step += 1
                 continue
 
-        print(f"Decoding completed: processed {step}/{time_frames} steps, {emitted_count} tokens emitted")
+        print(f"Decoding completed: processed {step}/{actual_max_steps} steps, {emitted_count} tokens emitted")
 
-        # Постобработка
-        text = self._postprocess_tokens(decoded_ids)
+        # Постобработка (используйте вашу _postprocess_tokens_improved)
+        # text = self._postprocess_tokens(decoded_ids) # или _postprocess_tokens_improved
+        text = self._postprocess_tokens_improved(decoded_ids)
 
-        # Вычисляем метрики
         metrics = {}
         if ground_truth and text:
             metrics = return_metrics(transcription=text,
@@ -916,10 +507,6 @@ class RnntASRPyTorch(nn.Module):
         return text
 
     def _postprocess_tokens_improved(self, decoded_ids: List[int]) -> str:
-        """
-        Улучшенная постобработка токенов в текст
-        """
-        # Фильтруем токены
         valid_tokens = []
         for tok_id in decoded_ids:
             if (tok_id < len(self.vocab) and
@@ -927,83 +514,56 @@ class RnntASRPyTorch(nn.Module):
                     tok_id != self.pad_idx and
                     tok_id != self.blank_idx):
                 token = self.vocab[tok_id]
-                if token.strip():  # Пропускаем пустые токены
+                if token.strip():
                     valid_tokens.append(token)
 
         print(f"Valid tokens: {len(valid_tokens)}")
 
-        # Более мягкая фильтрация дубликатов
         filtered_tokens = []
         i = 0
         while i < len(valid_tokens):
             token = valid_tokens[i]
-
-            # Подсчитываем количество одинаковых токенов подряд
             consecutive_count = 1
             while (i + consecutive_count < len(valid_tokens) and
                    valid_tokens[i + consecutive_count] == token):
                 consecutive_count += 1
-
-            # Оставляем максимум 2 одинаковых токена подряд
-            # (иногда повторения могут быть естественными)
-            add_count = min(consecutive_count, 2)
-
-            # Для коротких токенов (1-2 символа) оставляем только 1
+            add_count = min(consecutive_count, 1)
             if len(token.replace('▁', '').strip()) <= 2:
                 add_count = 1
-
             for _ in range(add_count):
                 filtered_tokens.append(token)
-
             i += consecutive_count
 
         print(f"After deduplication: {len(filtered_tokens)} tokens")
 
-        # Собираем текст
         text = "".join(filtered_tokens)
         text = text.replace("▁", " ")
-
-        # Постобработка текста
-        # 1. Множественные пробелы
-        text = re.sub(r'\s+', ' ', text)
-        text = text.strip()
-
-        # 2. Убираем чрезмерные повторения символов (более 2 подряд)
+        text = re.sub(r'\s+', ' ', text).strip()
         text = re.sub(r'(.)\1{2,}', r'\1\1', text)
 
-        # 3. Постобработка слов
         words = text.split()
         cleaned_words = []
-
         i = 0
         while i < len(words):
             word = words[i].strip()
             if not word:
                 i += 1
                 continue
-
-            # Подсчитываем повторения слов
             consecutive_word_count = 1
             while (i + consecutive_word_count < len(words) and
                    words[i + consecutive_word_count].strip().lower() == word.lower()):
                 consecutive_word_count += 1
-
-            # Для длинных слов (>3 символа) оставляем максимум 1 повторение
-            # Для коротких слов оставляем только 1
             if len(word) > 3:
                 add_word_count = min(consecutive_word_count, 2)
             else:
                 add_word_count = 1
-
             for _ in range(add_word_count):
                 cleaned_words.append(word)
-
             i += consecutive_word_count
 
         text = " ".join(cleaned_words)
-
-        # Финальная очистка
         text = re.sub(r'\s+', ' ', text).strip()
+        text = re.sub(r'[.,!?]$', '', text).strip()  # Удаление точки в конце
 
         print(f"Final transcription (Fixed Greedy): '{text}'")
         print(f"Token processing: {len(decoded_ids)} -> {len(valid_tokens)} -> {len(filtered_tokens)}")
@@ -1158,7 +718,7 @@ class RnntASRPyTorch(nn.Module):
             transcription, _, timestamps = self.decode_rnnt_greedy_improved(
                 encoder_output=encoder_output,
                 vocab=self.vocab,
-                blank_idx=self.blank_idx,
+                blank_idx=self.true_blank_idx,
                 max_vocab_idx=self.max_vocab_idx,
                 ground_truth=ground_truth,
                 max_steps=max_steps,

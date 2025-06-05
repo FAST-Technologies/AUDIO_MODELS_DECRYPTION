@@ -825,6 +825,7 @@ for beam_width in beam_widths:
         )
         print(f"Beam Search результат: '{transcription_bs[0]}'")
         print(f"Количество слов: {len(transcription_bs[0].split())}")
+print("Транскрипция декодирования по лучу (RNN-T PyTorch):", transcription_bs)
 
 preprocessor_Rnnt_NumPy = RnntASRNumPy(
     encoder_path="onnx_models/encoder-stt_ru_fastconformer_hybrid_large_pc_RNNT.onnx",
