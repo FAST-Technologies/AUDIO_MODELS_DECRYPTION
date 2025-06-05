@@ -754,8 +754,9 @@ transcription_rnnt_gd = rnnt_model.recognize(
     waveform.numpy(),
     decode_flag="GD",
     ground_truth=ground_truth,
-    max_steps=1000,
-    min_tokens=30
+    max_steps=2000,
+    min_tokens=18,
+    state_init="zero"
 )
 print("Транскрипция жадного декодирования (RNN-T PyTorch):", transcription_rnnt_gd)
 
