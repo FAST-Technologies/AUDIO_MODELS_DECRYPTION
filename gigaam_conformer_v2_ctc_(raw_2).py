@@ -810,17 +810,17 @@ print(f"Новый метод:  {new_words}")
 
 # Тестирование beam search с исправленным препроцессингом
 print("\n=== ТЕСТИРОВАНИЕ BEAM SEARCH ===")
-beam_widths = [5, 10, 15]
+beam_widths = [5, 8, 10, 12, 15]
 for beam_width in beam_widths:
-    for lp in [0.3, 0.7, 1.0, 1.5]:
+    for lp in [0.3, 0.7, 1.0, 1.5, 2.0]:
         print(f"\nТестирование RNN-T: beam_width={beam_width}, length_penalty={lp}")
-        transcription_bs = rnnt_model.recognize_fixed(
+        transcription_bs = rnnt_model.recognize(
             waveforms=waveform.numpy(),
             decode_flag="BS",
             beam_width=beam_width,
             length_penalty=lp,
             ground_truth=ground_truth,
-            max_steps=3000,
+            max_steps=2000,
             min_tokens=15
         )
         print(f"Beam Search результат: '{transcription_bs[0]}'")
