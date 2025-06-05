@@ -750,7 +750,41 @@ plt.tight_layout()
 plt.show()
 
 ground_truth = "мне необходимо вам рассказать следующую историю о своей жизни чем четче я говорю тем лучший результат я получу"
-transcription_rnnt_gd = rnnt_model.recognize(
+
+# beam_widths = [5, 10, 15]
+# for beam_width in beam_widths:
+#     for lp in [0.3, 0.7, 1.0, 1.5]:
+#         print(f"\nТестирование RNN-T: beam_width={beam_width}, length_penalty={lp}")
+#         transcription = rnnt_model.recognize(
+#             waveforms=waveform.numpy(),
+#             decode_flag="BS",
+#             beam_width=beam_width,
+#             length_penalty=lp,
+#             ground_truth=ground_truth,
+#             max_steps=2000,
+#             min_tokens=20
+#         )
+#         print(f"Транскрипция: {transcription}")
+#
+#
+# print("Транскрипция декодирования по лучу (RNN-T PyTorch):", transcription)
+# Используем ИСПРАВЛЕННОЕ жадное декодирование
+print("=== ТЕСТИРОВАНИЕ ИСПРАВЛЕННОГО ЖАДНОГО ДЕКОДИРОВАНИЯ ===")
+transcription_fixed_gd = rnnt_model.recognize(
+    waveforms=waveform.numpy(),
+    decode_flag="GD",
+    ground_truth=ground_truth,
+    max_steps=3000,  # Увеличено для полной обработки
+    min_tokens=15,
+#     max_steps=2000,
+#     min_tokens=18,
+    state_init="zero"
+)
+print("Транскрипция исправленного жадного декодирования (RNN-T PyTorch):", transcription_fixed_gd)
+
+# Сравнение со старым методом
+print("\n=== СРАВНЕНИЕ СО СТАРЫМ МЕТОДОМ ===")
+transcription_old_gd = rnnt_model.recognize(
     waveform.numpy(),
     decode_flag="GD",
     ground_truth=ground_truth,
@@ -758,25 +792,39 @@ transcription_rnnt_gd = rnnt_model.recognize(
     min_tokens=18,
     state_init="zero"
 )
-print("Транскрипция жадного декодирования (RNN-T PyTorch):", transcription_rnnt_gd)
+print("Транскрипция старого жадного декодирования:", transcription_old_gd)
 
+print(f"\nGround Truth: '{ground_truth}'")
+print(f"Старый метод: '{transcription_old_gd[0]}'")
+print(f"Новый метод:  '{transcription_fixed_gd[0]}'")
+
+# Подсчет слов
+gt_words = len(ground_truth.split())
+old_words = len(transcription_old_gd[0].split())
+new_words = len(transcription_fixed_gd[0].split())
+
+print(f"\nКоличество слов:")
+print(f"Ground Truth: {gt_words}")
+print(f"Старый метод: {old_words}")
+print(f"Новый метод:  {new_words}")
+
+# Тестирование beam search с исправленным препроцессингом
+print("\n=== ТЕСТИРОВАНИЕ BEAM SEARCH ===")
 beam_widths = [5, 10, 15]
 for beam_width in beam_widths:
     for lp in [0.3, 0.7, 1.0, 1.5]:
         print(f"\nТестирование RNN-T: beam_width={beam_width}, length_penalty={lp}")
-        transcription = rnnt_model.recognize(
+        transcription_bs = rnnt_model.recognize_fixed(
             waveforms=waveform.numpy(),
             decode_flag="BS",
             beam_width=beam_width,
             length_penalty=lp,
             ground_truth=ground_truth,
-            max_steps=2000,
-            min_tokens=20
+            max_steps=3000,
+            min_tokens=15
         )
-        print(f"Транскрипция: {transcription}")
-
-
-print("Транскрипция декодирования по лучу (RNN-T PyTorch):", transcription)
+        print(f"Beam Search результат: '{transcription_bs[0]}'")
+        print(f"Количество слов: {len(transcription_bs[0].split())}")
 
 preprocessor_Rnnt_NumPy = RnntASRNumPy(
     encoder_path="onnx_models/encoder-stt_ru_fastconformer_hybrid_large_pc_RNNT.onnx",
