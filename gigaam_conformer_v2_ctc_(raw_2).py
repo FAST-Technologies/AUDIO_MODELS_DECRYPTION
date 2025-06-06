@@ -810,7 +810,7 @@ print(f"Новый метод:  {new_words}")
 
 # Тестирование beam search с исправленным препроцессингом
 print("\n=== ТЕСТИРОВАНИЕ BEAM SEARCH ===")
-beam_widths = [5, 8, 10, 12, 15]
+beam_widths = [8, 10, 12, 15]
 for beam_width in beam_widths:
     for lp in [0.3, 0.7, 1.0, 1.5, 2.0]:
         print(f"\nТестирование RNN-T: beam_width={beam_width}, length_penalty={lp}")
@@ -820,8 +820,8 @@ for beam_width in beam_widths:
             beam_width=beam_width,
             length_penalty=lp,
             ground_truth=ground_truth,
-            max_steps=2000,
-            min_tokens=15
+            max_steps=3000,
+            min_tokens=18
         )
         print(f"Beam Search результат: '{transcription_bs[0]}'")
         print(f"Количество слов: {len(transcription_bs[0].split())}")
