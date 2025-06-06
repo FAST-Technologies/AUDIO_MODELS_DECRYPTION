@@ -731,7 +731,6 @@ transcriptionGD_NumPy, metricsGD_NumPy = preprocessor_NumPy.recognize(
 rnnt_model = RnntASRPyTorch(
     encoder_path="onnx_models/encoder-stt_ru_fastconformer_hybrid_large_pc_RNNT.onnx",
     decoder_joint_path="onnx_models/decoder_joint-stt_ru_fastconformer_hybrid_large_pc_RNNT.onnx",
-    features=80
 )
 
 waveform, sr = torchaudio.load("audio_files/20250404_174500.wav")
@@ -810,6 +809,7 @@ print(f"Новый метод:  {new_words}")
 
 # Тестирование beam search с исправленным препроцессингом
 print("\n=== ТЕСТИРОВАНИЕ BEAM SEARCH ===")
+transcription_bs = None
 beam_widths = [8, 10, 12, 15]
 for beam_width in beam_widths:
     for lp in [0.3, 0.7, 1.0, 1.5, 2.0]:
@@ -835,18 +835,18 @@ preprocessor_Rnnt_NumPy = RnntASRNumPy(
 # Инференс RNN-T NumPy
 audio_prev = audio_prev.astype(np.float32)
 print(f"Форма audio_prev перед передачей в recognize (RNN-T NumPy): {audio_prev.shape}")
-transcriptionGD_Rnnt_NumPy, metricsGD_Rnnt_NumPy = preprocessor_Rnnt_NumPy.recognize(
+transcriptionGD_Rnnt_NumPy = preprocessor_Rnnt_NumPy.recognize(
     waveforms=audio_prev,
     decode_flag="GD",
     ground_truth=ground_truth
 )
 
-transcriptionBS_Rnnt_NumPy, metricsBS_Rnnt_NumPy = None, None
+transcriptionBS_Rnnt_NumPy, metricsBS_Rnnt_NumPy = None, []
 for beam_width in beam_widths:
     for lp in length_penalties:
         print(f"\nTesting RNN-T NumPy beam_width={beam_width}, length_penalty={lp}")
         time.sleep(5)
-        transcriptionBS_Rnnt_NumPy, metricsBS_Rnnt_NumPy = preprocessor_Rnnt_NumPy.recognize(
+        transcriptionBS_Rnnt_NumPy= preprocessor_Rnnt_NumPy.recognize(
             waveforms=audio_prev,
             decode_flag="BS",
             beam_width=beam_width,

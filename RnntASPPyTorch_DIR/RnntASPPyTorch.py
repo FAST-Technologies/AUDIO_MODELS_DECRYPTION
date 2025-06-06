@@ -1,4 +1,3 @@
-import librosa
 import torch
 import numpy as np
 import onnxruntime as rt
@@ -14,8 +13,10 @@ n_fft = 400
 win_length = 400
 hop_length = 160
 n_mels = 80
+features = 80
 preemph = 0.97
 log_zero_guard_value = 2 ** -24
+vocab_path = "onnx_models/vocab-stt_ru_fastconformer_hybrid_large_pc_RNNT.txt"
 
 def preprocess_audio(audio_tensor: torch.Tensor, audio_len: torch.Tensor) -> Tuple[np.ndarray, np.ndarray]:
     # Применяем нормализацию
@@ -79,12 +80,14 @@ def load_vocab(vocab_path: str) -> List[str]:
     return vocab
 
 class RnntASRPyTorch:
-    def __init__(self, encoder_path: str, decoder_joint_path: str, features: int = 80):
+    def __init__(self,
+                 encoder_path: str,
+                 decoder_joint_path: str):
         self.features = features
         self.hidden_size = 640
         self._encoder = rt.InferenceSession(encoder_path, providers=["CPUExecutionProvider"])
         self._decoder_joint = rt.InferenceSession(decoder_joint_path, providers=["CPUExecutionProvider"])
-        self.vocab = load_vocab("onnx_models/vocab-stt_ru_fastconformer_hybrid_large_pc_RNNT.txt")
+        self.vocab = load_vocab(vocab_path)
         self._setup_token_indices()
         self._print_model_info()
 
@@ -96,7 +99,6 @@ class RnntASRPyTorch:
         self._decoder_output_name = self._decoder_joint.get_outputs()[0].name
         self._decoder_state_out_name = self._decoder_joint.get_outputs()[1].name
 
-        # Выводим информацию о входах декодера для отладки
         print("Decoder joint inputs:")
         for inp in self._decoder_joint.get_inputs():
             print(f"Name: {inp.name}, Shape: {inp.shape}, Type: {inp.type}")
@@ -125,6 +127,9 @@ class RnntASRPyTorch:
         for tensor in tensors:
             print(f"Name: {tensor.name}, Shape: {tensor.shape}")
 
+    def out_len(self, input_lengths: np.ndarray) -> np.ndarray:
+        return np.floor_divide(input_lengths, 160) + 1
+
     def extract_features(self, input_signal: torch.Tensor, length: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         print(f"input_signal shape: {input_signal.shape}, min: {input_signal.min().item()}, max: {input_signal.max().item()}")
         if torch.isnan(input_signal).any() or torch.isinf(input_signal).any():
@@ -143,15 +148,21 @@ class RnntASRPyTorch:
 
         return torch.from_numpy(features), torch.from_numpy(features_len)
 
-    def _encode(self, features: np.ndarray, features_lens: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def _encode(self,
+                features: np.ndarray,
+                features_lens: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray]:
         encoder_out, encoder_out_lens = self._encoder.run(
             ["outputs", "encoded_lengths"],
             {"audio_signal": features, "length": features_lens}
         )
         return encoder_out, encoder_out_lens
 
-    def _decode(self, prev_tokens: List[int], prev_state: Tuple[np.ndarray, np.ndarray], encoder_out: np.ndarray) -> \
-            Tuple[np.ndarray, int, Tuple[np.ndarray, np.ndarray]]:
+    def _decode(self,
+                prev_tokens: List[int],
+                prev_state: Tuple[np.ndarray, np.ndarray],
+                encoder_out: np.ndarray
+    ) -> Tuple[np.ndarray, int, Tuple[np.ndarray, np.ndarray]]:
         prev_token = self._blank_idx if not prev_tokens else prev_tokens[-1]
         inputs = {
             "encoder_outputs": encoder_out.astype(np.float32),
@@ -198,42 +209,37 @@ class RnntASRPyTorch:
         )
         logits = outputs[0]
         print(f"Raw logits min: {logits.min()}, max: {logits.max()}")
-        # Logits stabilization (applied in beam search, keeping here for reference if needed)
         # logits = logits - np.max(logits)
 
-        # --- DEBUG LOGGING ADDED HERE ---
-        logits_t = logits[0, 0, 0].copy()  # Get the 1D array of logits for the current step
-
-        # Print raw logits for blank and top 5 non-blank tokens
+        logits_t = logits[0, 0, 0].copy()
         print(f"DEBUG: t={t}, raw logits_t for blank {self._blank_idx}: {logits_t[self._blank_idx]:.4f}")
-        # Filter out blank_idx and find top 5 non-blank
         non_blank_logits = np.delete(logits_t, self._blank_idx)
         non_blank_vocab_indices = np.delete(np.arange(len(self.vocab)), self._blank_idx)
-
-        # Ensure we don't try to get more indices than available
         k_val = min(5, len(non_blank_logits))
         top_5_raw_indices_in_non_blank_array = np.argsort(non_blank_logits)[-k_val:]
         top_5_raw_indices = non_blank_vocab_indices[top_5_raw_indices_in_non_blank_array]
 
         print("DEBUG: t={t}, top 5 raw non-blank logits: " +
               ", ".join([f"{self.vocab[idx]}:{logits_t[idx]:.4f}" for idx in top_5_raw_indices]))
-        # --- END DEBUG LOGGING ---
 
         return logits, (outputs[1], outputs[2])
 
     def decode_rnnt_greedy_improved(self,
                                     encoder_output: np.ndarray,
-                                    ground_truth: str = None) -> Tuple[str, Dict[str, float], List[int]]:
+                                    ground_truth: str = None,
+                                    state_init: str = "zero"
+    ) -> Tuple[str, Dict[str, float], List[int]]:
         max_len = encoder_output.shape[2]
         print(f"Starting improved greedy decoding with {max_len} time frames")
-        state = (np.zeros((1, 1, self.hidden_size), dtype=np.float32),
-                 np.zeros((1, 1, self.hidden_size), dtype=np.float32))
+        if state_init == "random":
+            state = (np.random.normal(0, 0.01, (1, 1, self.hidden_size)).astype(np.float32),
+                     np.random.normal(0, 0.01, (1, 1, self.hidden_size)).astype(np.float32))
+        else:
+            state = (np.zeros((1, 1, self.hidden_size), dtype=np.float32),
+                     np.zeros((1, 1, self.hidden_size), dtype=np.float32))
         hyp = []
-        prev_token = self._blank_idx
         blank_penalty = -0.5
-        temperature = 1.0
         repeat_penalty = 0.1
-
         for t in range(max_len):
             current_encoder_out = encoder_output[:, :, t:t + 1]
             logits, _, state = self._decode(hyp, state, current_encoder_out)
@@ -242,33 +248,40 @@ class RnntASRPyTorch:
                 logits[self._blank_idx] += blank_penalty
             if self._pad_idx < len(logits):
                 logits[self._pad_idx] -= 5.0
-            if temperature != 1.0:
-                logits = logits / temperature
             logits = logits - np.max(logits)
-            probs = np.exp(logits) / (np.sum(np.exp(logits)) + 1e-12)
+            probs = np.exp(logits) / (np.sum(np.exp(logits)))
 
             if hyp and hyp[-1] != self._blank_idx:
                 probs[hyp[-1]] *= repeat_penalty
 
             next_token = np.argmax(probs).item()
-            if probs[next_token] < 0.4:
-                next_token = self._blank_idx
             if next_token != self._blank_idx and (not hyp or next_token != hyp[-1]):
                 hyp.append(next_token)
             if t % 5 == 0:
                 token_str = self.vocab[next_token] if next_token < len(self.vocab) else 'OUT_OF_VOCAB'
                 print(f"Step {t}: token={next_token}('{token_str}'), prob={probs[next_token]:.3f}")
 
-        text = self._postprocess_improved(hyp)
+        text = self._postprocess_improved(hyp, "GD")
         metrics = {}
         if ground_truth and text:
-            metrics = return_metrics(transcription=text, ground_truth=ground_truth, metrics=metrics, total_log_prob=0.0, flag="improved_greedy")
-        return text, metrics, [t for t in range(len(hyp))]  # Простые временные метки
+            metrics = return_metrics(transcription=text,
+                                     ground_truth=ground_truth,
+                                     metrics=metrics,
+                                     total_log_prob=0.0,
+                                     flag="improved_greedy")
+        return text, metrics, [t for t in range(len(hyp))]
 
-    def decode_rnnt_beam_search_fixed(self, encoder_output: np.ndarray, vocab: List[str], blank_idx: int,
-                                      max_vocab_idx: int, beam_width: int = 8, length_penalty: float = 0.7,
-                                      ground_truth: str = None, max_steps: int = 1000, min_tokens: int = 18,
-                                      state_init: str = "zero") -> Tuple[str, Dict[str, float], List[int]]:
+    def decode_rnnt_beam_search_fixed(self,
+                                      encoder_output: np.ndarray,
+                                      vocab: List[str],
+                                      blank_idx: int,
+                                      beam_width: int = 8,
+                                      length_penalty: float = 0.7,
+                                      ground_truth: str = None,
+                                      max_steps: int = 1000,
+                                      min_tokens: int = 18,
+                                      state_init: str = "zero"
+    ) -> Tuple[str, Dict[str, float], List[int]]:
         if encoder_output.shape[0] != 1:
             raise ValueError(f"Expected batch_size=1, got {encoder_output.shape[0]}")
 
@@ -276,55 +289,50 @@ class RnntASRPyTorch:
         print(f"Starting fixed beam search: beam_width={beam_width}, time_frames={time_frames}")
 
         if state_init == "random":
-            state1 = np.random.normal(0, 0.01, (1, 1, self.hidden_size)).astype(np.float32)
-            state2 = np.random.normal(0, 0.01, (1, 1, self.hidden_size)).astype(np.float32)
+            state = (np.random.normal(0, 0.01, (1, 1, self.hidden_size)).astype(np.float32),
+                     np.random.normal(0, 0.01, (1, 1, self.hidden_size)).astype(np.float32))
         else:
-            state1 = np.zeros((1, 1, self.hidden_size), dtype=np.float32)
-            state2 = np.zeros((1, 1, self.hidden_size), dtype=np.float32)
+            state = (np.zeros((1, 1, self.hidden_size), dtype=np.float32),
+                     np.zeros((1, 1, self.hidden_size), dtype=np.float32))
 
-        initial_prev_token_scalar = blank_idx
-        initial_prev_token_tensor = np.array([[initial_prev_token_scalar]], dtype=np.int32)
-
-        beams = [(tuple(), 0.0, (state1, state2), initial_prev_token_scalar, 0, 0, [])]
-
+        # Инициализируем beam с пустой последовательностью и начальным токеном
+        beams = [(tuple(), 0.0, state, [], 0, 0, [])]
         temperature = 0.8
         blank_penalty = -2.0
         repeat_penalty = 0.05
-
         step = 0
         max_iterations = min(time_frames * 4, max_steps)
 
         while step < max_iterations:
             new_beams = []
 
-            for seq, score, (state1, state2), prev_token_scalar, curr_t, token_count, timestamps in beams:
+            for seq, score, (state1, state2), prev_tokens, curr_t, token_count, timestamps in beams:
                 if curr_t >= time_frames:
-                    new_beams.append((seq, score, (state1, state2), prev_token_scalar, curr_t, token_count, timestamps))
+                    new_beams.append((seq, score, (state1, state2), prev_tokens, curr_t, token_count, timestamps))
                     continue
 
-                # Исправляем индексацию: curr_t не должен превышать time_frames - 1
                 current_encoder_out = encoder_output[:, :, curr_t:curr_t + 1]
                 if current_encoder_out.shape[2] == 0:
                     print(f"Warning: encoder_output_t is empty at t={curr_t}, skipping this beam")
-                    new_beams.append(
-                        (seq, score, (state1, state2), prev_token_scalar, curr_t + 1, token_count, timestamps))
+                    new_beams.append((seq, score, (state1, state2), prev_tokens, curr_t + 1, token_count, timestamps))
                     continue
 
-                prev_token_tensor_for_step = np.array([[prev_token_scalar]], dtype=np.int32)
-
-                logits_full, (new_state1, new_state2) = self.decode_step(
-                    encoder_output,
-                    prev_token_tensor_for_step,
-                    (state1, state2),
-                    curr_t
-                )
-                logits_t = np.squeeze(logits_full).copy()
+                logits, _, (new_state1, new_state2) = self._decode(prev_tokens, (state1, state2), current_encoder_out)
+                logits_t = logits.copy()
 
                 if logits_t.size == 0:
                     print(f"Warning: logits are empty at t={curr_t}, skipping this beam")
-                    new_beams.append(
-                        (seq, score, (state1, state2), prev_token_scalar, curr_t + 1, token_count, timestamps))
+                    new_beams.append((seq, score, (state1, state2), prev_tokens, curr_t + 1, token_count, timestamps))
                     continue
+
+                print(f"DEBUG: t={curr_t}, raw logits_t for blank {self._blank_idx}: {logits_t[self._blank_idx]:.4f}")
+                non_blank_logits = np.delete(logits_t, self._blank_idx)
+                non_blank_vocab_indices = np.delete(np.arange(len(self.vocab)), self._blank_idx)
+                k_val = min(5, len(non_blank_logits))
+                top_5_raw_indices_in_non_blank_array = np.argsort(non_blank_logits)[-k_val:]
+                top_5_raw_indices = non_blank_vocab_indices[top_5_raw_indices_in_non_blank_array]
+                print("DEBUG: t={curr_t}, top 5 raw non-blank logits: " +
+                      ", ".join([f"{self.vocab[idx]}:{logits_t[idx]:.4f}" for idx in top_5_raw_indices]))
 
                 if blank_idx < len(logits_t):
                     logits_t[blank_idx] += blank_penalty
@@ -349,15 +357,14 @@ class RnntASRPyTorch:
                     new_seq = seq + (token,)
                     new_timestamps = timestamps + [curr_t]
                     new_count = token_count + (1 if token != blank_idx else 0)
-                    new_prev_token_scalar = token
+                    new_prev_tokens = prev_tokens + [token]
 
-                    new_beams.append((new_seq, new_score, (new_state1, new_state2), new_prev_token_scalar, curr_t + 1,
+                    new_beams.append((new_seq, new_score, (new_state1, new_state2), new_prev_tokens, curr_t + 1,
                                       new_count, new_timestamps))
 
-            # Дедупликация и сортировка лучей
             unique_beams = {}
             for beam in new_beams:
-                key = (beam[0], beam[3])
+                key = (beam[0], tuple(beam[3]))
                 if key not in unique_beams or beam[1] > unique_beams[key][1]:
                     unique_beams[key] = beam
 
@@ -377,7 +384,7 @@ class RnntASRPyTorch:
         print(f"Best raw sequence (token IDs): {best_seq}")
         print(f"Mapped raw sequence: {[vocab[idx] for idx in best_seq if idx < len(vocab)]}")
 
-        text = self._postprocess_tokens_conservative(list(best_seq))
+        text = self._postprocess_improved(list(best_seq), "BS")
 
         print(f"Fixed Beam Search completed:")
         print(f"  Transcription: '{text}'")
@@ -401,7 +408,10 @@ class RnntASRPyTorch:
 
         return text, metrics, timestamps
 
-    def _postprocess_improved(self, decoded_ids: List[int]) -> str:
+    def _postprocess_improved(self,
+                              decoded_ids: List[int],
+                              flag: str = "GD"
+    ) -> str:
         valid_tokens = [self.vocab[tok_id] for tok_id in decoded_ids if tok_id < len(self.vocab) and tok_id not in {self._blank_idx, self._pad_idx}]
         text = "".join(valid_tokens).replace("▁", " ").strip()
         text = re.sub(r'\s+', ' ', text)
@@ -412,17 +422,20 @@ class RnntASRPyTorch:
         last_word = None
         for word in words:
             if word and (not last_word or word.lower() != last_word.lower() or len(word) <= 2):
-                if word == "лучш":
-                    word = "лучше"
                 cleaned_words.append(word)
                 last_word = word
 
         text = " ".join(cleaned_words).strip()
         text = re.sub(r'[.,!?]$', '', text).strip()
-        print(f"Final transcription (Improved Greedy): '{text}'")
+        if flag == "GD":
+            print(f"Final transcription (Improved Greedy Decoding): '{text}'")
+        elif flag == "BS":
+            print(f"Final transcription (Improved Beam Search): '{text}'")
         return text
 
-    def _postprocess_tokens_conservative(self, decoded_ids: List[int]) -> str:
+    def _postprocess_tokens_conservative(self,
+                                         decoded_ids: List[int]
+    ) -> str:
         filtered_tokens = []
         special_ids = {self._blank_idx, self._pad_idx}
 
@@ -443,6 +456,7 @@ class RnntASRPyTorch:
                 cleaned_words.append(words[i])
 
         text = " ".join(cleaned_words).strip()
+        print(f"Final transcription (Improved Beam): '{text}'")
         return text
 
     def recognize(self,
@@ -466,9 +480,14 @@ class RnntASRPyTorch:
 
         audio_tensor = torch.from_numpy(waveforms).float().unsqueeze(0)
         audio_length = torch.tensor([audio_tensor.shape[1]], dtype=torch.long)
-        print(f"audio_tensor shape: {audio_tensor.shape}, audio_length: {audio_length}, min: {audio_tensor.min().item()}, max: {audio_tensor.max().item()}")
+        print(
+            f"audio_tensor shape: {audio_tensor.shape}, audio_length: {audio_length}, min: {audio_tensor.min().item()}, max: {audio_tensor.max().item()}")
         if torch.isnan(audio_tensor).any() or torch.isinf(audio_tensor).any():
             print("Warning: audio_tensor contains NaN or Inf values!")
+
+        # Вычисляем предсказанную длину выхода
+        predicted_out_len = self.out_len(audio_length.numpy())
+        print(f"Predicted output length: {predicted_out_len}")
 
         features, lengths = self.extract_features(audio_tensor, audio_length)
         print(f"features shape: {features.shape}, lengths: {lengths}")
@@ -487,14 +506,23 @@ class RnntASRPyTorch:
         features = features.detach().cpu().numpy().astype(np.float32)
         lengths = lengths.detach().cpu().numpy().astype(np.int64)
 
-        # Unpack the encoder_output from the tuple
         encoder_out_data, encoder_out_lengths = self._encode(features, lengths)
         print(f"Encoder output data shape: {encoder_out_data.shape}, lengths: {encoder_out_lengths}")
 
         if decode_flag == "GD":
-            transcription, _, timestamps = self.decode_rnnt_greedy_improved(encoder_out_data, ground_truth)
+            transcription, _, timestamps = self.decode_rnnt_greedy_improved(encoder_out_data,
+                                                                            ground_truth,
+                                                                            state_init)
         elif decode_flag == "BS":
-            transcription, _, timestamps = self.decode_rnnt_beam_search_fixed(encoder_out_data, self.vocab, self._blank_idx, self._max_vocab_idx, beam_width, length_penalty, ground_truth, max_steps, min_tokens, state_init)
+            transcription, _, timestamps = self.decode_rnnt_beam_search_fixed(encoder_out_data,
+                                                                              self.vocab,
+                                                                              self._blank_idx,
+                                                                              beam_width,
+                                                                              length_penalty,
+                                                                              ground_truth,
+                                                                              max_steps,
+                                                                              min_tokens,
+                                                                              state_init)
         else:
             raise ValueError("decode_flag must be 'GD' or 'BS'")
 

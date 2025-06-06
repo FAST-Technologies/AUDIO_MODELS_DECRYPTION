@@ -1,69 +1,49 @@
-from typing import Tuple, List, Dict
 import numpy as np
 import onnxruntime as rt
-
+import matplotlib.pyplot as plt
+from typing import List, Tuple, Dict
+import re
 from MetricsClass import return_metrics
 
-# Загружаем словарь из файла
+# Параметры предобработки
+sample_rate = 16_000
+n_fft = 400
+win_length = 400
+hop_length = 160
+n_mels = 80
+features = 80
+preemph = 0.97
+log_zero_guard_value = 2 ** -24
+vocab_path = "onnx_models/vocab-stt_ru_fastconformer_hybrid_large_pc_RNNT.txt"
+
+# Загрузка вокабуляра
 def load_vocab(vocab_path: str) -> List[str]:
     vocab = []
-    with open(vocab_path, "r", encoding="utf-8") as f:
+    with open(vocab_path, 'r', encoding='utf-8') as f:
         for line in f:
-            token, idx = line.strip().split()
-            idx = int(idx)
-            while len(vocab) <= idx:
-                vocab.append("")
-            vocab[idx] = token
+            parts = line.strip().split()
+            if len(parts) == 2:
+                token, idx = parts
+                idx = int(idx)
+                while len(vocab) <= idx:
+                    vocab.append("")
+                vocab[idx] = token
+            elif len(parts) == 1:
+                vocab.append(parts[0])
+    while len(vocab) < 1025:
+        vocab.append("<pad>")
     return vocab
 
-VOCAB = load_vocab("onnx_models/vocab-stt_ru_fastconformer_hybrid_large_pc_RNNT.txt")
-BLANK_IDX = VOCAB.index("<blk>")
-MAX_VOCAB_IDX = len(VOCAB) - 1
-
 class RnntASRNumPy:
-    """
-    A module for RNN-T based Automatic Speech Recognition (ASR) using NumPy and ONNX models.
-
-    This module processes raw audio signals, extracts logarithmic Mel spectrogram features,
-    and performs transcription using an RNN-T model (encoder + decoder/joint) with
-    greedy decoding or beam search.
-    """
-    def __init__(self,
-                 encoder_path: str,
-                 decoder_joint_path: str,
-                 sample_rate: int = 16000,
-                 features: int = 64) -> None:
-        """
-        Initialize the GigaamRnntASRNumPy with ONNX encoder and decoder/joint models.
-
-        Parameters
-        ----------
-        encoder_path : str
-            Path to the ONNX encoder model file.
-        decoder_joint_path : str
-            Path to the ONNX decoder/joint model file.
-        sample_rate : int, optional
-            Sample rate of the audio. Defaults to 16000 Hz.
-        features : int, optional
-            Number of Mel features. Defaults to 64.
-        """
-        self.sample_rate = sample_rate
+    def __init__(self, encoder_path: str, decoder_joint_path: str):
         self.features = features
-        self.hop_length = sample_rate // 100  # 160
-        self.n_fft = sample_rate // 40  # 400
-        self.win_length = sample_rate // 40  # 400
-
-        # Загружаем ONNX модели
+        self.hidden_size = 640
         self._encoder = rt.InferenceSession(encoder_path, providers=["CPUExecutionProvider"])
         self._decoder_joint = rt.InferenceSession(decoder_joint_path, providers=["CPUExecutionProvider"])
+        self.vocab = load_vocab(vocab_path)
+        self._setup_token_indices()
+        self._print_model_info()
 
-        # Проверяем входы и выходы моделей
-        self.tensor_info("Encoder Inputs", self._encoder.get_inputs())
-        self.tensor_info("Encoder Outputs", self._encoder.get_outputs())
-        self.tensor_info("Decoder/Joint Inputs", self._decoder_joint.get_inputs())
-        self.tensor_info("Decoder/Joint Outputs", self._decoder_joint.get_outputs())
-
-        # Имена входов и выходов
         self._encoder_input_name = self._encoder.get_inputs()[0].name
         self._encoder_length_name = self._encoder.get_inputs()[1].name
         self._decoder_input_name = self._decoder_joint.get_inputs()[0].name
@@ -72,40 +52,52 @@ class RnntASRNumPy:
         self._decoder_output_name = self._decoder_joint.get_outputs()[0].name
         self._decoder_state_out_name = self._decoder_joint.get_outputs()[1].name
 
-        # Размер скрытого состояния (предполагаем; уточните из модели)
-        self.hidden_size = 320  # Обычно для FastConformer моделей
+        print("Decoder joint inputs:")
+        for inp in self._decoder_joint.get_inputs():
+            print(f"Name: {inp.name}, Shape: {inp.shape}, Type: {inp.type}")
 
-        # Создание банка Mel-фильтров
-        self.mel_fb = self._create_mel_filterbank()
+    def _setup_token_indices(self):
+        self._blank_idx = self.vocab.index("<blk>") if "<blk>" in self.vocab else 1024
+        self._unk_idx = self.vocab.index("<unk>") if "<unk>" in self.vocab else 1024
+        self._blk_idx = self._blank_idx
+        self._pad_idx = self.vocab.index("<pad>") if "<pad>" in self.vocab else 1024
+        self._max_vocab_idx = len(self.vocab) - 1
+        self._tokens_to_filter = {self._blank_idx, self._unk_idx, self._blk_idx, self._pad_idx}
+        for i in range(self._max_vocab_idx + 1, len(self.vocab)):
+            self._tokens_to_filter.add(i)
 
-        self.vocab = VOCAB
-        self.blank_idx = BLANK_IDX
-        self.max_vocab_idx = MAX_VOCAB_IDX
+    def _print_model_info(self):
+        print(f"Loaded vocabulary with {len(self.vocab)} tokens")
+        print(f"First 10 tokens: {self.vocab[:10]}")
+        print(f"Last 10 tokens: {self.vocab[-10:]}")
+        print(f"Blank index: {self._blank_idx} ('{self.vocab[self._blank_idx]}')")
+        print(f"UNK index: {self._unk_idx} ('{self.vocab[self._unk_idx]}')")
+        print(f"Pad index: {self._pad_idx} ('{self.vocab[self._pad_idx]}')")
+        print(f"Max vocab index: {self._max_vocab_idx}")
+
+    def _print_tensor_info(self, title: str, tensors: List[rt.NodeArg]) -> None:
+        print(f"{title}:")
+        for tensor in tensors:
+            print(f"Name: {tensor.name}, Shape: {tensor.shape}")
+
+    def out_len(self, input_lengths: np.ndarray) -> np.ndarray:
+        return (input_lengths - n_fft) // hop_length + 1
 
     def _create_mel_filterbank(self) -> np.ndarray:
-        """
-        Creates a bank of Mel filters for converting the power spectrum into a Mel spectrogram.
+        """Creates a bank of Mel filters for converting the power spectrum to a Mel spectrogram."""
+        n_freqs = int(n_fft // 2 + 1)
+        f_min, f_max = 0.0, sample_rate / 2.0
 
-        Returns
-        -------
-        np.ndarray
-            Matrix of Mel filters, shape [n_mels, n_freqs], where n_mels = self.features,
-            n_freqs = self.n_fft // 2 + 1.
-        """
-        n_freqs = int(self.n_fft // 2 + 1)
-        f_min, f_max = 0.0, self.sample_rate / 2.0
-
-        # Перевод частот в Mel-шкалу: mel = 1125 * ln(1 + f/700)
         mel_min = 1125.0 * np.log1p(f_min / 700.0)
         mel_max = 1125.0 * np.log1p(f_max / 700.0)
 
-        mel_points = np.linspace(mel_min, mel_max, self.features + 2)
+        mel_points = np.linspace(mel_min, mel_max, n_mels + 2)
         freq_points = 700.0 * (np.expm1(mel_points / 1125.0))
 
-        fb = np.zeros((self.features, n_freqs))
+        fb = np.zeros((n_mels, n_freqs))
         freqs = np.linspace(0, f_max, n_freqs)
 
-        for m in range(self.features):
+        for m in range(n_mels):
             f_left = freq_points[m]
             f_center = freq_points[m + 1]
             f_right = freq_points[m + 2]
@@ -116,378 +108,360 @@ class RnntASRNumPy:
                     fb[m, f] = (f_right - freqs[f]) / (f_right - f_center)
         return fb
 
-    def forward(self,
-                input_signal: np.ndarray,
-                length: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Extract logarithmic Mel spectrogram features from the input audio signal.
-
-        Parameters
-        ----------
-        input_signal : np.ndarray
-            Audio input signal, shape [batch_size, channels, time] or [batch_size, time].
-        length : np.ndarray
-            Lengths of the input signals, shape [batch_size].
-
-        Returns
-        -------
-        Tuple[np.ndarray, np.ndarray]
-            - Mel spectrogram, shape [batch_size, n_mels, time_frames] or [batch_size, channels, n_mels, time_frames].
-            - Output lengths, shape [batch_size].
-        """
-        if input_signal.ndim == 2:
-            input_signal = input_signal[:, np.newaxis, :]
+    def extract_features(self, input_signal: np.ndarray, length: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        print(f"input_signal shape: {input_signal.shape}, min: {np.min(input_signal)}, max: {np.max(input_signal)}")
+        if np.isnan(input_signal).any() or np.isinf(input_signal).any():
+            print("Warning: input_signal contains NaN or Inf values!")
 
         batch_size, channels, time = input_signal.shape
-        num_frames = (time - self.n_fft) // self.hop_length + 1
+        num_frames = (time - n_fft) // hop_length + 1
+        print(f"batch_size: {batch_size}, channels: {channels}, time: {time}, num_frames: {num_frames}")
+
         if num_frames <= 0:
-            raise ValueError(f"Signal length ({time}) is too short for STFT with n_fft={self.n_fft} "
-                             f"and hop_length={self.hop_length}.")
+            raise ValueError(
+                f"Signal length ({time}) is too short for STFT with n_fft={n_fft} and hop_length={hop_length}. "
+                f"Need at least {n_fft} samples."
+            )
 
-        # Окно Ханна
-        window = 0.5 - 0.5 * np.cos(2.0 * np.pi * np.arange(self.win_length) / (self.win_length - 1))
-
+        window = 0.5 - 0.5 * np.cos(2.0 * np.pi * np.arange(win_length) / (win_length - 1))
         spectrogram = []
+
         for b in range(batch_size):
             for c in range(channels):
                 signal = input_signal[b, c]
+                # Применяем преэмфазис
+                if preemph != 0.0:
+                    signal[1:] = signal[1:] - preemph * signal[:-1]
                 frames = []
                 for i in range(num_frames):
-                    start = i * self.hop_length
-                    frame = signal[start:start + self.n_fft]
-                    if len(frame) < self.n_fft:
-                        frame = np.pad(frame, (0, self.n_fft - len(frame)), mode='constant')
+                    start = i * hop_length
+                    frame = signal[start:start + n_fft]
+                    if len(frame) < n_fft:
+                        frame = np.pad(frame, (0, n_fft - len(frame)), mode='constant')
                     frame = frame * window[:len(frame)]
-                    fft = np.fft.rfft(frame, n=self.n_fft)
+                    fft = np.fft.rfft(frame, n=n_fft)
                     power = np.abs(fft) ** 2
                     frames.append(power)
-                if not frames:
-                    raise ValueError("No frames extracted.")
                 spectrogram.append(np.stack(frames, axis=0))
 
         spectrogram = np.stack(spectrogram, axis=0).reshape(batch_size, channels, num_frames, -1)
-        mel_spec = np.matmul(spectrogram, self.mel_fb.T)
+        mel_fb = self._create_mel_filterbank()
+        mel_spec = np.matmul(spectrogram, mel_fb.T)
         mel_spec = mel_spec.transpose(0, 1, 3, 2)
         mel_spec = np.log(np.clip(mel_spec, 1e-9, 1e9))
 
         if channels == 1:
             mel_spec = mel_spec.squeeze(1)
 
-        return mel_spec, self.out_len(length)
+        features = mel_spec.astype(np.float32)
+        features_len = self.out_len(length)
 
-    def out_len(self, input_lengths: np.ndarray) -> np.ndarray:
-        """
-        Calculate the output length after feature extraction.
+        plt.figure(figsize=(10, 4))
+        plt.imshow(features[0, 0] if channels > 1 else features[0], aspect="auto", origin="lower", interpolation="nearest")
+        plt.colorbar(label="Normalized Log Mel Energy")
+        plt.title("Mel-Spectrogram (After Normalization)")
+        plt.xlabel("Time Frames")
+        plt.ylabel("Mel Frequency Bins")
+        plt.tight_layout()
+        plt.show()
 
-        Parameters
-        ----------
-        input_lengths : np.ndarray
-            Input lengths, shape [batch_size].
+        return features, features_len
 
-        Returns
-        -------
-        np.ndarray
-            Output lengths, shape [batch_size].
-        """
-        return (input_lengths // self.hop_length + 1).astype(np.int64)
+    def _encode(self, features: np.ndarray, features_lens: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        encoder_out, encoder_out_lens = self._encoder.run(
+            ["outputs", "encoded_lengths"],
+            {"audio_signal": features, "length": features_lens}
+        )
+        return encoder_out, encoder_out_lens
 
-    def tensor_info(self, title: str, tensors: List[rt.NodeArg]) -> None:
-        """
-        Print tensor information for ONNX model inputs/outputs.
-
-        Parameters
-        ----------
-        title : str
-            Title for the tensor info (e.g., "Encoder Inputs").
-        tensors : List[rt.NodeArg]
-            List of tensor nodes.
-        """
-        print(f"{title}:")
-        for tensor in tensors:
-            print(f"Name: {tensor.name}, Shape: {tensor.shape}")
-
-    def encode(self, features: np.ndarray, lengths: np.ndarray) -> np.ndarray:
-        """
-        Run the encoder on the extracted features to get hidden states.
-
-        Parameters
-        ----------
-        features : np.ndarray
-            Mel spectrogram features, shape [batch_size, n_mels, time_frames].
-        lengths : np.ndarray
-            Lengths of the features, shape [batch_size].
-
-        Returns
-        -------
-        np.ndarray
-            Encoder outputs (hidden states), shape [batch_size, time_frames, hidden_size].
-        """
+    def _decode(self, prev_tokens: List[int], prev_state: Tuple[np.ndarray, np.ndarray], encoder_out: np.ndarray) -> \
+            Tuple[np.ndarray, int, Tuple[np.ndarray, np.ndarray]]:
+        prev_token = self._blank_idx if not prev_tokens else prev_tokens[-1]
         inputs = {
-            self._encoder_input_name: features,
-            self._encoder_length_name: lengths
+            "encoder_outputs": encoder_out.astype(np.float32),
+            "targets": np.array([[prev_token]], dtype=np.int32),
+            "target_length": np.array([1], dtype=np.int32),
+            "input_states_1": prev_state[0],
+            "input_states_2": prev_state[1],
         }
-        encoder_output = self._encoder.run([self._encoder.get_outputs()[0].name], inputs)[0]
-        return encoder_output
-
-    def decode_step(self,
-                    encoder_output: np.ndarray,
-                    time_step: int,
-                    prev_token: np.ndarray,
-                    state: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Perform one decoding step using the decoder/joint network.
-
-        Parameters
-        ----------
-        encoder_output : np.ndarray
-            Encoder outputs, shape [batch_size, time_frames, hidden_size].
-        time_step : int
-            Current time step.
-        prev_token : np.ndarray
-            Previous token, shape [batch_size, 1].
-        state : np.ndarray
-            Decoder state, shape [batch_size, 1, hidden_size].
-
-        Returns
-        -------
-        Tuple[np.ndarray, np.ndarray]
-            - Logits, shape [batch_size, 1, vocab_size].
-            - New state, shape [batch_size, 1, hidden_size].
-        """
-        encoder_frame = encoder_output[:, time_step:time_step+1, :]
-        inputs = {
-            self._decoder_input_name: encoder_frame,
-            self._decoder_prev_token_name: prev_token,
-            self._decoder_state_name: state
-        }
-        logits, new_state = self._decoder_joint.run(
-            [self._decoder_output_name, self._decoder_state_out_name],
+        outputs = self._decoder_joint.run(
+            ["outputs", "output_states_1", "output_states_2"],
             inputs
         )
-        return logits, new_state
+        logits = np.squeeze(outputs[0])
+        return logits, -1, (outputs[1], outputs[2])
 
-    def decode_rnnt_greedy(self,
-                           encoder_output: np.ndarray,
-                           vocab: List[str],
-                           blank_idx: int,
-                           max_vocab_idx: int,
-                           ground_truth: str = None) -> Tuple[str, Dict[str, float]]:
-        """
-        Perform greedy decoding on RNN-T encoder outputs.
+    def decode_rnnt_greedy_improved(self, encoder_output: np.ndarray, ground_truth: str = None, state_init: str = "zero") -> \
+            Tuple[str, Dict[str, float], List[int]]:
+        max_len = encoder_output.shape[2]
+        print(f"Starting improved greedy decoding with {max_len} time frames")
+        if state_init == "random":
+            state = (np.random.normal(0, 0.01, (1, 1, self.hidden_size)).astype(np.float32),
+                     np.random.normal(0, 0.01, (1, 1, self.hidden_size)).astype(np.float32))
+        else:
+            state = (np.zeros((1, 1, self.hidden_size), dtype=np.float32),
+                     np.zeros((1, 1, self.hidden_size), dtype=np.float32))
+        hyp = []
+        blank_penalty = -0.5
+        repeat_penalty = 0.1
+        for t in range(max_len):
+            current_encoder_out = encoder_output[:, :, t:t + 1]
+            logits, _, state = self._decode(hyp, state, current_encoder_out)
+            logits = logits.copy()
+            if self._blank_idx < len(logits):
+                logits[self._blank_idx] += blank_penalty
+            if self._pad_idx < len(logits):
+                logits[self._pad_idx] -= 5.0
+            logits = logits - np.max(logits)
+            probs = np.exp(logits) / (np.sum(np.exp(logits)))
 
-        Parameters
-        ----------
-        encoder_output : np.ndarray
-            Encoder outputs, shape [batch_size, time_frames, hidden_size].
-        vocab : List[str]
-            Vocabulary list.
-        blank_idx : int
-            Blank token index.
-        max_vocab_idx : int
-            Maximum valid token index.
-        ground_truth : str, optional
-            Ground truth for metrics.
+            if hyp and hyp[-1] != self._blank_idx:
+                probs[hyp[-1]] *= repeat_penalty
 
-        Returns
-        -------
-        Tuple[str, Dict[str, float]]
-            - Transcription.
-            - Metrics (if ground_truth is provided).
-        """
+            next_token = np.argmax(probs).item()
+            if next_token != self._blank_idx and (not hyp or next_token != hyp[-1]):
+                hyp.append(next_token)
+            if t % 5 == 0:
+                token_str = self.vocab[next_token] if next_token < len(self.vocab) else 'OUT_OF_VOCAB'
+                print(f"Step {t}: token={next_token}('{token_str}'), prob={probs[next_token]:.3f}")
+
+        text = self._postprocess_improved(hyp, "GD")
+        metrics = {}
+        if ground_truth and text:
+            metrics = return_metrics(transcription=text,
+                                    ground_truth=ground_truth,
+                                    metrics=metrics,
+                                    total_log_prob=0.0,
+                                    flag="improved_greedy")
+        return text, metrics, [t for t in range(len(hyp))]
+
+    def decode_rnnt_beam_search_fixed(self, encoder_output: np.ndarray, vocab: List[str], blank_idx: int,
+                                     beam_width: int = 8, length_penalty: float = 0.7, ground_truth: str = None,
+                                     max_steps: int = 1000, min_tokens: int = 18, state_init: str = "zero") -> \
+            Tuple[str, Dict[str, float], List[int]]:
         if encoder_output.shape[0] != 1:
             raise ValueError(f"Expected batch_size=1, got {encoder_output.shape[0]}")
 
-        T = encoder_output.shape[1]
-        state = np.zeros((1, 1, self.hidden_size), dtype=np.float32)
-        prev_token = np.array([[0]], dtype=np.int64)
-        decoded_ids = []
-        total_log_prob = 0.0
+        batch_size, hidden_size, time_frames = encoder_output.shape
+        print(f"Starting fixed beam search: beam_width={beam_width}, time_frames={time_frames}")
 
-        for t in range(T):
-            logits, state = self.decode_step(encoder_output, t, prev_token, state)
-            logits = logits[0, 0]
-            token_idx = np.argmax(logits, axis=-1).item()
-            log_prob = logits[token_idx]
-            total_log_prob += float(log_prob)
+        if state_init == "random":
+            state = (np.random.normal(0, 0.01, (1, 1, self.hidden_size)).astype(np.float32),
+                     np.random.normal(0, 0.01, (1, 1, self.hidden_size)).astype(np.float32))
+        else:
+            state = (np.zeros((1, 1, self.hidden_size), dtype=np.float32),
+                     np.zeros((1, 1, self.hidden_size), dtype=np.float32))
 
-            if token_idx != blank_idx and token_idx <= max_vocab_idx:
-                decoded_ids.append(token_idx)
-            prev_token = np.array([[token_idx]], dtype=np.int64)
+        beams = [(tuple(), 0.0, state, [], 0, 0, [])]
+        temperature = 0.8
+        blank_penalty = -2.0
+        repeat_penalty = 0.05
+        step = 0
+        max_iterations = min(time_frames * 4, max_steps)
 
-        transcription = "".join(vocab[tok] for tok in decoded_ids)
-        print(f"Decoded transcription (Greedy): {transcription}")
-        print(f"Log probability (Greedy): {total_log_prob:.15f}")
+        while step < max_iterations:
+            new_beams = []
+
+            for seq, score, (state1, state2), prev_tokens, curr_t, token_count, timestamps in beams:
+                if curr_t >= time_frames:
+                    new_beams.append((seq, score, (state1, state2), prev_tokens, curr_t, token_count, timestamps))
+                    continue
+
+                current_encoder_out = encoder_output[:, :, curr_t:curr_t + 1]
+                if current_encoder_out.shape[2] == 0:
+                    print(f"Warning: encoder_output_t is empty at t={curr_t}, skipping this beam")
+                    new_beams.append((seq, score, (state1, state2), prev_tokens, curr_t + 1, token_count, timestamps))
+                    continue
+
+                logits, _, (new_state1, new_state2) = self._decode(prev_tokens, (state1, state2), current_encoder_out)
+                logits_t = logits.copy()
+
+                if logits_t.size == 0:
+                    print(f"Warning: logits are empty at t={curr_t}, skipping this beam")
+                    new_beams.append((seq, score, (state1, state2), prev_tokens, curr_t + 1, token_count, timestamps))
+                    continue
+
+                print(f"DEBUG: t={curr_t}, raw logits_t for blank {self._blank_idx}: {logits_t[self._blank_idx]:.4f}")
+                non_blank_logits = np.delete(logits_t, self._blank_idx)
+                non_blank_vocab_indices = np.delete(np.arange(len(self.vocab)), self._blank_idx)
+                k_val = min(5, len(non_blank_logits))
+                top_5_raw_indices_in_non_blank_array = np.argsort(non_blank_logits)[-k_val:]
+                top_5_raw_indices = non_blank_vocab_indices[top_5_raw_indices_in_non_blank_array]
+                print("DEBUG: t={curr_t}, top 5 raw non-blank logits: " +
+                      ", ".join([f"{self.vocab[idx]}:{logits_t[idx]:.4f}" for idx in top_5_raw_indices]))
+
+                if blank_idx < len(logits_t):
+                    logits_t[blank_idx] += blank_penalty
+                if self._pad_idx < len(logits_t):
+                    logits_t[self._pad_idx] -= 5.0
+
+                if temperature != 1.0:
+                    logits_t = logits_t / temperature
+                logits_t = logits_t - np.max(logits_t)
+                exp_logits = np.exp(logits_t)
+                probs = exp_logits / (np.sum(exp_logits) + 1e-12)
+
+                if len(seq) > 0:
+                    last_token = seq[-1]
+                    if last_token != blank_idx:
+                        probs[last_token] *= repeat_penalty
+
+                top_indices = np.argsort(probs)[-beam_width * 2:][::-1]
+                for token in top_indices:
+                    prob = probs[token]
+                    new_score = score + np.log(prob + 1e-12)
+                    new_seq = seq + (token,)
+                    new_timestamps = timestamps + [curr_t]
+                    new_count = token_count + (1 if token != blank_idx else 0)
+                    new_prev_tokens = prev_tokens + [token]
+
+                    new_beams.append((new_seq, new_score, (new_state1, new_state2), new_prev_tokens, curr_t + 1,
+                                      new_count, new_timestamps))
+
+            unique_beams = {}
+            for beam in new_beams:
+                key = (beam[0], tuple(beam[3]))
+                if key not in unique_beams or beam[1] > unique_beams[key][1]:
+                    unique_beams[key] = beam
+
+            beams = sorted(list(unique_beams.values()), key=lambda x: x[1], reverse=True)[:beam_width]
+            step += 1
+
+            if all(beam[4] >= time_frames for beam in beams) and step > min_tokens:
+                print(f"All beams completed at step {step}")
+                break
+
+        if not beams:
+            return "", {}, []
+
+        best_beam = beams[0]
+        best_seq, best_score, _, _, _, token_count, timestamps = best_beam
+
+        print(f"Best raw sequence (token IDs): {best_seq}")
+        print(f"Mapped raw sequence: {[vocab[idx] for idx in best_seq if idx < len(vocab)]}")
+
+        text = self._postprocess_improved(list(best_seq), "BS")
+
+        print(f"Fixed Beam Search completed:")
+        print(f"  Transcription: '{text}'")
+        print(f"  Log probability: {best_score:.6f}")
+        normalized_score = best_score / (max(1, token_count) ** length_penalty) if token_count > 0 else best_score
+        print(f"  Normalized score: {normalized_score:.6f}")
+        print(f"  Total tokens: {token_count}")
+        print(f"  Steps: {step}")
+
         metrics = {}
-        if ground_truth:
-            metrics = return_metrics(transcription=transcription,
-                                     ground_truth=ground_truth,
-                                     metrics=metrics,
-                                     total_log_prob=total_log_prob,
-                                     flag="greedy")
-        return transcription, metrics
-
-    def decode_rnnt_beam_search(self,
-                                encoder_output: np.ndarray,
-                                vocab: List[str],
-                                blank_idx: int,
-                                max_vocab_idx: int,
-                                beam_width: int = 3,
-                                length_penalty: float = 1.0,
-                                ground_truth: str = None) -> Tuple[str, Dict[str, float]]:
-        """
-        Perform beam search decoding on RNN-T encoder outputs.
-
-        Parameters
-        ----------
-        encoder_output : np.ndarray
-            Encoder outputs, shape [batch_size, time_frames, hidden_size].
-        vocab : List[str]
-            Vocabulary list.
-        blank_idx : int
-            Blank token index.
-        max_vocab_idx : int
-            Maximum valid token index.
-        beam_width : int, optional
-            Number of beams. Defaults to 3.
-        length_penalty : float, optional
-            Length penalty. Defaults to 1.0.
-        ground_truth : str, optional
-            Ground truth for metrics.
-
-        Returns
-        -------
-        Tuple[str, Dict[str, float]]
-            - Transcription.
-            - Metrics (if ground_truth is provided).
-        """
-        if encoder_output.shape[0] != 1:
-            raise ValueError(f"Expected batch_size=1, got {encoder_output.shape[0]}")
-
-        T = encoder_output.shape[1]
-        state = np.zeros((1, 1, self.hidden_size), dtype=np.float32)
-        beams = [(tuple(), 0.0, state, np.array([[0]], dtype=np.int64))]
-        num_classes = max_vocab_idx + 1
-
-        for t in range(T):
-            new_beams = {}
-            for seq, score, state, prev_token in beams:
-                logits, new_state = self.decode_step(encoder_output, t, prev_token, state)
-                logits = logits[0, 0]
-                logits = logits - np.max(logits)
-                log_probs = logits - np.log(np.sum(np.exp(logits)))
-
-                for token in range(num_classes):
-                    if token > max_vocab_idx and token != blank_idx:
-                        continue
-                    token_log_prob = float(log_probs[token])
-                    new_score = score + token_log_prob
-                    new_seq = list(seq)
-
-                    if token != blank_idx:
-                        new_seq.append(token)
-                    new_seq = tuple(new_seq)
-                    if new_seq in new_beams:
-                        existing_score = new_beams[new_seq][1]
-                        new_beams[new_seq] = (
-                            new_seq,
-                            np.logaddexp(existing_score, new_score),
-                            new_state,
-                            np.array([[token]], dtype=np.int64)
-                        )
-                    else:
-                        new_beams[new_seq] = (new_seq, new_score, new_state, np.array([[token]], dtype=np.int64))
-
-            beams = sorted(new_beams.values(),
-                           key=lambda x: x[1] / (len(x[0]) ** length_penalty if len(x[0]) > 0 else 1.0),
-                           reverse=True)[:beam_width]
-
-        best_seq, best_score, _, _ = beams[0]
-        transcription = "".join(vocab[tok] for tok in best_seq)
-        print(f"Transcription (Beam Search, beam_width={beam_width}, length_penalty={length_penalty}): {transcription}")
-        print(f"Log probability (Beam Search): {best_score:.14f}")
-        metrics = {}
-        if ground_truth:
-            metrics = return_metrics(transcription=transcription,
-                                     ground_truth=ground_truth,
-                                     metrics=metrics,
-                                     total_log_prob=best_score,
-                                     beam_width=beam_width,
-                                     length_penalty=length_penalty,
-                                     flag="beam")
-        return transcription, metrics
-
-    def recognize(self,
-                  waveforms: np.ndarray,
-                  decode_flag: str = "GD",
-                  beam_width: int = 10,
-                  length_penalty: float = 0.7,
-                  ground_truth: str = None) -> Tuple[str, Dict[str, float]]:
-        """
-        Recognize speech from the input waveform.
-
-        Parameters
-        ----------
-        waveforms : np.ndarray
-            Input waveform, shape [channels, samples] or [samples].
-        decode_flag : str, optional
-            Decoding method: "GD" or "BS". Defaults to "GD".
-        beam_width : int, optional
-            Number of beams. Defaults to 10.
-        length_penalty : float, optional
-            Length penalty. Defaults to 0.7.
-        ground_truth : str, optional
-            Ground truth for metrics.
-
-        Returns
-        -------
-        Tuple[str, Dict[str, float]]
-            - Transcription.
-            - Metrics (if ground_truth is provided).
-        """
-        if not isinstance(waveforms, np.ndarray):
-            raise TypeError(f"Expected waveforms to be a numpy.ndarray, got {type(waveforms)}")
-
-        if waveforms.dtype != np.float32:
-            print(f"Warning: waveforms dtype is {waveforms.dtype}, expected np.float32. Casting.")
-            waveforms = waveforms.astype(np.float32)
-
-        if waveforms.ndim == 1:
-            waveforms = waveforms[np.newaxis, :]
-        elif waveforms.ndim != 2:
-            raise ValueError(f"Expected waveforms to have 1 or 2 dimensions, got shape {waveforms.shape}")
-
-        if waveforms.shape[0] > 1:
-            waveforms = waveforms[0][np.newaxis, :]
-
-        audio_tensor = waveforms[np.newaxis, :]
-        audio_length = np.array([audio_tensor.shape[-1]], dtype=np.int64)
-
-        features, lengths = self.forward(audio_tensor, audio_length)
-        features = features.astype(np.float32)
-        lengths = lengths.astype(np.int64)
-
-        encoder_output = self.encode(features, lengths)
-        print("Encoder output shape:", encoder_output.shape)
-
-        if decode_flag == "GD":
-            transcription, metrics = self.decode_rnnt_greedy(
-                encoder_output=encoder_output,
-                vocab=self.vocab,
-                blank_idx=self.blank_idx,
-                max_vocab_idx=self.max_vocab_idx,
-                ground_truth=ground_truth
-            )
-        elif decode_flag == "BS":
-            transcription, metrics = self.decode_rnnt_beam_search(
-                encoder_output=encoder_output,
-                vocab=self.vocab,
-                blank_idx=self.blank_idx,
-                max_vocab_idx=self.max_vocab_idx,
+        if ground_truth and text:
+            metrics = return_metrics(
+                transcription=text,
+                ground_truth=ground_truth,
+                metrics=metrics,
+                total_log_prob=best_score,
                 beam_width=beam_width,
                 length_penalty=length_penalty,
-                ground_truth=ground_truth
+                flag="BS"
             )
-        else:
-            raise ValueError(f"Invalid decode_flag: {decode_flag}. Must be 'GD' or 'BS'.")
 
-        return transcription, metrics
+        return text, metrics, timestamps
+
+    def _postprocess_improved(self, decoded_ids: List[int], flag: str = "GD") -> str:
+        valid_tokens = [self.vocab[tok_id] for tok_id in decoded_ids if tok_id < len(self.vocab) and tok_id not in {self._blank_idx, self._pad_idx}]
+        text = "".join(valid_tokens).replace("▁", " ").strip()
+        text = re.sub(r'\s+', ' ', text)
+        text = re.sub(r'(.)\1{2,}', r'\1\1', text)
+
+        words = text.split()
+        cleaned_words = []
+        last_word = None
+        for word in words:
+            if word and (not last_word or word.lower() != last_word.lower() or len(word) <= 2):
+                cleaned_words.append(word)
+                last_word = word
+
+        text = " ".join(cleaned_words).strip()
+        text = re.sub(r'[.,!?]$', '', text).strip()
+        if flag == "GD":
+            print(f"Final transcription (Improved Greedy Decoding): '{text}'")
+        elif flag == "BS":
+            print(f"Final transcription (Improved Beam Search): '{text}'")
+        return text
+
+    def _postprocess_tokens_conservative(self, decoded_ids: List[int]) -> str:
+        filtered_tokens = []
+        special_ids = {self._blank_idx, self._pad_idx}
+
+        for tok_id in decoded_ids:
+            if tok_id < len(self.vocab) and tok_id not in special_ids:
+                token = self.vocab[tok_id].strip()
+                if token and token not in filtered_tokens[-1:]:
+                    filtered_tokens.append(token)
+
+        text = "".join(filtered_tokens).replace("▁", " ").strip()
+        text = re.sub(r'\s+', ' ', text)
+        text = re.sub(r'(.)\1{2,}', r'\1\1', text)
+
+        words = text.split()
+        cleaned_words = []
+        for i in range(len(words)):
+            if i == 0 or words[i] != words[i - 1]:
+                cleaned_words.append(words[i])
+
+        text = " ".join(cleaned_words).strip()
+        print(f"Final transcription (Improved Beam): '{text}'")
+        return text
+
+    def recognize(self, waveforms: np.ndarray, decode_flag: str = "GD", ground_truth: str = None,
+                  max_steps: int = 3000, min_tokens: int = 15, state_init: str = "zero",
+                  beam_width: int = 8, length_penalty: float = 0.7) -> Tuple[str, List[int]]:
+        if not isinstance(waveforms, np.ndarray):
+            raise TypeError(f"Expected waveforms to be a numpy.ndarray, got {type(waveforms)}")
+        if waveforms.dtype != np.float32:
+            waveforms = waveforms.astype(np.float32)
+        if waveforms.ndim == 2 and waveforms.shape[0] > 1:
+            waveforms = np.mean(waveforms, axis=0)
+        elif waveforms.ndim == 2:
+            waveforms = waveforms[0]
+        waveforms = waveforms[np.newaxis, np.newaxis, :]  # [1, 1, samples]
+
+        audio_length = np.array([waveforms.shape[-1]], dtype=np.int64)
+        print(
+            f"waveforms shape: {waveforms.shape}, audio_length: {audio_length}, min: {np.min(waveforms)}, max: {np.max(waveforms)}")
+        if np.isnan(waveforms).any() or np.isinf(waveforms).any():
+            print("Warning: waveforms contains NaN or Inf values!")
+
+        # Вычисляем предсказанную длину выхода
+        predicted_out_len = self.out_len(audio_length)
+        print(f"Predicted output length: {predicted_out_len}")
+
+        features, features_len = self.extract_features(waveforms, audio_length)
+        print(f"features shape: {features.shape}, lengths: {features_len}")
+        if np.isnan(features).any() or np.isinf(features).any():
+            print("Warning: features contain NaN or Inf values!")
+
+        plt.figure(figsize=(10, 4))
+        # Исправление: используем features[0] вместо features[0, 0], чтобы получить массив (80, 1410)
+        plt.imshow(features[0], aspect="auto", origin="lower", interpolation="nearest")
+        plt.colorbar(label="Normalized Log Mel Energy")
+        plt.title("Mel-Spectrogram (After Normalization)")
+        plt.xlabel("Time Frames")
+        plt.ylabel("Mel Frequency Bins")
+        plt.tight_layout()
+        plt.show()
+
+        features = features.astype(np.float32)
+        features_len = features_len.astype(np.int64)
+
+        encoder_out_data, encoder_out_lengths = self._encode(features, features_len)
+        print(f"Encoder output data shape: {encoder_out_data.shape}, lengths: {encoder_out_lengths}")
+
+        if decode_flag == "GD":
+            transcription, _, timestamps = self.decode_rnnt_greedy_improved(encoder_out_data, ground_truth, state_init)
+        elif decode_flag == "BS":
+            transcription, _, timestamps = self.decode_rnnt_beam_search_fixed(encoder_out_data, self.vocab,
+                                                                              self._blank_idx,
+                                                                              beam_width, length_penalty, ground_truth,
+                                                                              max_steps, min_tokens, state_init)
+        else:
+            raise ValueError("decode_flag must be 'GD' or 'BS'")
+
+        return transcription, timestamps
