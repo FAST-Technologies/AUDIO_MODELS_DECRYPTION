@@ -18,7 +18,33 @@ preemph = 0.97
 log_zero_guard_value = 2 ** -24
 vocab_path = "onnx_models/vocab-stt_ru_fastconformer_hybrid_large_pc_RNNT.txt"
 
-def preprocess_audio(audio_tensor: torch.Tensor, audio_len: torch.Tensor) -> Tuple[np.ndarray, np.ndarray]:
+def preprocess_audio(audio_tensor: torch.Tensor,
+                     audio_len: torch.Tensor
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Preprocess raw audio tensor to extract log-mel spectrogram features.
+
+    Parameters
+    ----------
+    audio_tensor : Tensor
+        Raw audio signal tensor, expected shape [batch, time].
+    audio_len : Tensor
+        Lengths of the input audio signals, expected shape [batch].
+
+    Returns
+    -------
+    Tuple[np.ndarray, np.ndarray]
+        A tuple containing:
+        - Log-mel spectrogram features, shape [batch, n_mels, time_frames].
+        - Output lengths after feature extraction, shape [batch].
+
+    Notes
+    -----
+    - Applies normalization using mean and standard deviation.
+    - Performs pre-emphasis to enhance higher frequencies.
+    - Computes spectrogram using Torchaudio's `Spectrogram` with a Hann window.
+    - Applies Mel-scale transformation followed by logarithmic scaling.
+    - Clamps values with `log_zero_guard_value` to avoid numerical issues during log computation.
+    """
     # Применяем нормализацию
     mean = audio_tensor.mean()
     std = audio_tensor.std()
@@ -76,6 +102,23 @@ def preprocess_audio(audio_tensor: torch.Tensor, audio_len: torch.Tensor) -> Tup
 
 # Загрузка вокабуляра
 def load_vocab(vocab_path: str) -> List[str]:
+    """Load vocabulary from a file into a list of tokens.
+
+    Parameters
+    ----------
+    vocab_path : str
+        Path to the vocabulary file containing token-index pairs or single tokens.
+
+    Returns
+    -------
+    List[str]
+        List of vocabulary tokens, padded with "<pad>" up to 1025 entries.
+
+    Notes
+    -----
+    - Supports files with either 'token index' pairs or single tokens per line.
+    - Pads the vocabulary with "<pad>" if the length is less than 1025.
+    """
     vocab = []
     with open(vocab_path, 'r', encoding='utf-8') as f:
         for line in f:
@@ -96,6 +139,20 @@ class RnntASRPyTorch:
     def __init__(self,
                  encoder_path: str,
                  decoder_joint_path: str):
+        """Initialize the RNN-T ASR model with ONNX encoder and decoder-joint components.
+
+        Parameters
+        ----------
+        encoder_path : str
+            Path to the ONNX encoder model file.
+        decoder_joint_path : str
+            Path to the ONNX decoder-joint model file.
+
+        Notes
+        -----
+        - Sets up model inputs and outputs based on ONNX session metadata.
+        - Loads vocabulary and initializes token indices for special tokens.
+        """
         self.features = features
         self.hidden_size = 640
         self._encoder = rt.InferenceSession(encoder_path, providers=["CPUExecutionProvider"])
@@ -117,6 +174,13 @@ class RnntASRPyTorch:
             print(f"Name: {inp.name}, Shape: {inp.shape}, Type: {inp.type}")
 
     def _setup_token_indices(self):
+        """Set up indices for special tokens in the vocabulary.
+
+        Notes
+        -----
+        - Identifies indices for blank, unknown, and padding tokens.
+        - Populates a set of tokens to filter during decoding.
+        """
         self._blank_idx = self.vocab.index("<blk>") if "<blk>" in self.vocab else 1024
         self._unk_idx = self.vocab.index("<unk>") if "<unk>" in self.vocab else 1024
         self._blk_idx = self._blank_idx
@@ -127,6 +191,12 @@ class RnntASRPyTorch:
             self._tokens_to_filter.add(i)
 
     def _print_model_info(self):
+        """Print detailed information about the loaded vocabulary and token indices.
+
+        Notes
+        -----
+        - Displays vocabulary size and sample tokens for debugging.
+        """
         print(f"Loaded vocabulary with {len(self.vocab)} tokens")
         print(f"First 10 tokens: {self.vocab[:10]}")
         print(f"Last 10 tokens: {self.vocab[-10:]}")
@@ -135,15 +205,72 @@ class RnntASRPyTorch:
         print(f"Pad index: {self._pad_idx} ('{self.vocab[self._pad_idx]}')")
         print(f"Max vocab index: {self._max_vocab_idx}")
 
-    def _print_tensor_info(self, title: str, tensors: List[rt.NodeArg]) -> None:
+    def _print_tensor_info(self,
+                           title: str,
+                           tensors: List[rt.NodeArg]
+    ) -> None:
+        """Print tensor metadata for debugging purposes.
+
+        Parameters
+        ----------
+        title : str
+            Title to describe the tensor group.
+        tensors : List[rt.NodeArg]
+            List of ONNX tensor metadata objects.
+
+        Notes
+        -----
+        - Displays name, shape, and type for each tensor.
+        """
         print(f"{title}:")
         for tensor in tensors:
             print(f"Name: {tensor.name}, Shape: {tensor.shape}")
 
     def out_len(self, input_lengths: np.ndarray) -> np.ndarray:
+        """Calculate output length after feature extraction based on input audio length.
+
+        Parameters
+        ----------
+        input_lengths : np.ndarray
+            Input audio lengths, shape [batch].
+
+        Returns
+        -------
+        np.ndarray
+            Output lengths after applying hop length, shape [batch].
+
+        Notes
+        -----
+        - Uses floor division with hop_length (160) to compute frame count.
+        """
         return np.floor_divide(input_lengths, 160) + 1
 
-    def extract_features(self, input_signal: torch.Tensor, length: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def extract_features(self,
+                         input_signal: torch.Tensor,
+                         length: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Extract log-mel spectrogram features from the input audio signal.
+
+        Parameters
+        ----------
+        input_signal : Tensor
+            Raw audio signal tensor, expected shape [batch, time].
+        length : Tensor
+            Lengths of the input audio signals, expected shape [batch].
+
+        Returns
+        -------
+        Tuple[Tensor, Tensor]
+            A tuple containing:
+            - Log-mel spectrogram features, shape [batch, features, time_frames].
+            - Output lengths after feature extraction, shape [batch].
+
+        Notes
+        -----
+        - Delegates to `preprocess_audio` for feature computation.
+        - Visualizes the spectrogram using matplotlib for inspection.
+        - Checks for NaN or Inf values in the input signal.
+        """
         print(f"input_signal shape: {input_signal.shape}, min: {input_signal.min().item()}, max: {input_signal.max().item()}")
         if torch.isnan(input_signal).any() or torch.isinf(input_signal).any():
             print("Warning: input_signal contains NaN or Inf values!")
@@ -165,6 +292,26 @@ class RnntASRPyTorch:
                 features: np.ndarray,
                 features_lens: np.ndarray
     ) -> Tuple[np.ndarray, np.ndarray]:
+        """Encode input features using the ONNX encoder model.
+
+        Parameters
+        ----------
+        features : np.ndarray
+            Log-mel spectrogram features, shape [batch, features, time_frames].
+        features_lens : np.ndarray
+            Lengths of the feature sequences, shape [batch].
+
+        Returns
+        -------
+        Tuple[np.ndarray, np.ndarray]
+            A tuple containing:
+            - Encoded output, shape [batch, hidden_size, time_frames].
+            - Output lengths after encoding, shape [batch].
+
+        Notes
+        -----
+        - Runs inference using the ONNX encoder session.
+        """
         encoder_out, encoder_out_lens = self._encoder.run(
             ["outputs", "encoded_lengths"],
             {"audio_signal": features, "length": features_lens}
@@ -176,6 +323,30 @@ class RnntASRPyTorch:
                 prev_state: Tuple[np.ndarray, np.ndarray],
                 encoder_out: np.ndarray
     ) -> Tuple[np.ndarray, int, Tuple[np.ndarray, np.ndarray]]:
+        """Decode a single step using the ONNX decoder-joint model.
+
+        Parameters
+        ----------
+        prev_tokens : List[int]
+            Previous decoded token sequence.
+        prev_state : Tuple[np.ndarray, np.ndarray]
+            Previous decoder states, shape [(1, 1, hidden_size), (1, 1, hidden_size)].
+        encoder_out : np.ndarray
+            Encoded output for the current time step, shape [batch, hidden_size, 1].
+
+        Returns
+        -------
+        Tuple[np.ndarray, int, Tuple[np.ndarray, np.ndarray]]
+            A tuple containing:
+            - Logits for the current step, shape [vocab_size].
+            - Placeholder return value (currently -1).
+            - Updated decoder states.
+
+        Notes
+        -----
+        - Uses the previous token or blank token as input.
+        - Runs inference using the ONNX decoder-joint session.
+        """
         prev_token = self._blank_idx if not prev_tokens else prev_tokens[-1]
         inputs = {
             "encoder_outputs": encoder_out.astype(np.float32),
@@ -196,7 +367,33 @@ class RnntASRPyTorch:
                     encoder_output: np.ndarray,
                     prev_token: np.ndarray,
                     state: Tuple[np.ndarray, np.ndarray],
-                    t: int) -> Tuple[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
+                    t: int
+    ) -> Tuple[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
+        """Perform a single decoding step using the ONNX decoder-joint model.
+
+        Parameters
+        ----------
+        encoder_output : np.ndarray
+            Encoded output, shape [batch, hidden_size, time].
+        prev_token : np.ndarray
+            Previous token ID, shape [1, 1].
+        state : Tuple[np.ndarray, np.ndarray]
+            Previous decoder states, shape [(1, 1, hidden_size), (1, 1, hidden_size)].
+        t : int
+            Current time step index.
+
+        Returns
+        -------
+        Tuple[np.ndarray, Tuple[np.ndarray, np.ndarray]]
+            A tuple containing:
+            - Logits for the current step, shape [1, 1, 1, vocab_size].
+            - Updated decoder states.
+
+        Notes
+        -----
+        - Handles empty encoder output with dummy logits.
+        - Prints debug information for logits and top-5 non-blank tokens.
+        """
         state1, state2 = state
         target_length = np.array([1], dtype=np.int32)
         encoder_output_t = encoder_output[:, :, t:t + 1]
@@ -242,6 +439,30 @@ class RnntASRPyTorch:
                                     ground_truth: str = None,
                                     state_init: str = "zero"
     ) -> Tuple[str, Dict[str, float], List[int]]:
+        """Perform greedy decoding to transcribe encoded audio output.
+
+        Parameters
+        ----------
+        encoder_output : np.ndarray
+            Encoded output from the encoder, shape [batch, hidden_size, time_frames].
+        ground_truth : str, optional
+            Ground truth transcription for metric computation.
+        state_init : str, optional
+            Initialization method for decoder states ('zero' or 'random').
+
+        Returns
+        -------
+        Tuple[str, Dict[str, float], List[int]]
+            A tuple containing:
+            - Transcribed text.
+            - Metrics dictionary if ground truth is provided.
+            - List of timestamps corresponding to decoded tokens.
+
+        Notes
+        -----
+        - Applies blank and repeat penalties during decoding.
+        - Uses `_postprocess_improved` for final text cleanup.
+        """
         max_len = encoder_output.shape[2]
         print(f"Starting improved greedy decoding with {max_len} time frames")
         if state_init == "random":
@@ -295,6 +516,43 @@ class RnntASRPyTorch:
                                       min_tokens: int = 18,
                                       state_init: str = "zero"
     ) -> Tuple[str, Dict[str, float], List[int]]:
+        """Perform fixed beam search decoding to transcribe encoded audio output.
+
+        Parameters
+        ----------
+        encoder_output : np.ndarray
+            Encoded output from the encoder, shape [batch, hidden_size, time_frames].
+        vocab : List[str]
+            Vocabulary list for token mapping.
+        blank_idx : int
+            Index of the blank token in the vocabulary.
+        beam_width : int, optional
+            Number of beams to maintain during search (default: 8).
+        length_penalty : float, optional
+            Penalty factor for sequence length (default: 0.7).
+        ground_truth : str, optional
+            Ground truth transcription for metric computation.
+        max_steps : int, optional
+            Maximum number of decoding steps (default: 1000).
+        min_tokens : int, optional
+            Minimum number of tokens to continue search (default: 18).
+        state_init : str, optional
+            Initialization method for decoder states ('zero' or 'random').
+
+        Returns
+        -------
+        Tuple[str, Dict[str, float], List[int]]
+            A tuple containing:
+            - Transcribed text.
+            - Metrics dictionary if ground truth is provided.
+            - List of timestamps corresponding to decoded tokens.
+
+        Notes
+        -----
+        - Implements beam search with temperature scaling and penalties.
+        - Prunes beams based on unique sequences and scores.
+        - Uses `_postprocess_improved` for final text cleanup.
+        """
         if encoder_output.shape[0] != 1:
             raise ValueError(f"Expected batch_size=1, got {encoder_output.shape[0]}")
 
@@ -425,6 +683,25 @@ class RnntASRPyTorch:
                               decoded_ids: List[int],
                               flag: str = "GD"
     ) -> str:
+        """Postprocess decoded token IDs into a cleaned text string.
+
+        Parameters
+        ----------
+        decoded_ids : List[int]
+            List of decoded token IDs from the model.
+        flag : str, optional
+            Flag to indicate decoding method ('GD' or 'BS') for logging.
+
+        Returns
+        -------
+        str
+            Cleaned and formatted transcription text.
+
+        Notes
+        -----
+        - Filters out special tokens and applies word deduplication.
+        - Normalizes whitespace and preserves double characters.
+        """
         valid_tokens = [self.vocab[tok_id] for tok_id in decoded_ids if tok_id < len(self.vocab) and tok_id not in {self._blank_idx, self._pad_idx}]
         text = "".join(valid_tokens).replace("▁", " ").strip()
         text = re.sub(r'\s+', ' ', text)
@@ -449,6 +726,23 @@ class RnntASRPyTorch:
     def _postprocess_tokens_conservative(self,
                                          decoded_ids: List[int]
     ) -> str:
+        """Conservatively postprocess decoded token IDs into a text string.
+
+        Parameters
+        ----------
+        decoded_ids : List[int]
+            List of decoded token IDs from the model.
+
+        Returns
+        -------
+        str
+            Cleaned and conservatively formatted transcription text.
+
+        Notes
+        -----
+        - Filters out special tokens and avoids consecutive duplicates.
+        - Normalizes whitespace and preserves double characters.
+        """
         filtered_tokens = []
         special_ids = {self._blank_idx, self._pad_idx}
 
@@ -480,7 +774,42 @@ class RnntASRPyTorch:
                   min_tokens: int = 15,
                   state_init: str = "zero",
                   beam_width: int = 8,
-                  length_penalty: float = 0.7) -> Tuple[str, List[int]]:
+                  length_penalty: float = 0.7
+    ) -> Tuple[str, List[int]]:
+        """Recognize speech from raw audio waveforms using the specified decoding method.
+
+        Parameters
+        ----------
+        waveforms : np.ndarray
+            Raw audio waveforms, expected shape [time] or [channels, time].
+        decode_flag : str, optional
+            Decoding method ('GD' for greedy, 'BS' for beam search) (default: 'GD').
+        ground_truth : str, optional
+            Ground truth transcription for metric computation.
+        max_steps : int, optional
+            Maximum number of decoding steps for beam search (default: 3000).
+        min_tokens : int, optional
+            Minimum number of tokens for beam search to continue (default: 15).
+        state_init : str, optional
+            Initialization method for decoder states ('zero' or 'random') (default: 'zero').
+        beam_width : int, optional
+            Number of beams for beam search (default: 8).
+        length_penalty : float, optional
+            Penalty factor for sequence length in beam search (default: 0.7).
+
+        Returns
+        -------
+        Tuple[str, List[int]]
+            A tuple containing:
+            - Transcribed text.
+            - List of timestamps corresponding to decoded tokens.
+
+        Notes
+        -----
+        - Preprocesses waveforms into features using `extract_features`.
+        - Supports both greedy and beam search decoding methods.
+        - Visualizes the spectrogram for inspection.
+        """
         if not isinstance(waveforms, np.ndarray):
             raise TypeError(f"Expected waveforms to be a numpy.ndarray, got {type(waveforms)}")
         if waveforms.dtype != np.float32:
