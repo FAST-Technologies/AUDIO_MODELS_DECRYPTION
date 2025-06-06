@@ -24,11 +24,16 @@ def preprocess_audio(audio_tensor: torch.Tensor, audio_len: torch.Tensor) -> Tup
     std = audio_tensor.std()
     if std == 0:
         std = 1e-6
+    print(f"Mean before CMVN: {mean.item()}, Std before CMVN: {std.item()}")
     audio_tensor = (audio_tensor - mean) / (std + 1e-6)
 
     # Преэмфазис
     if preemph != 0.0:
         audio_tensor = torch.cat([audio_tensor[:, :1], audio_tensor[:, 1:] - preemph * audio_tensor[:, :-1]], dim=-1)
+
+    time = audio_len.item()
+    num_frames = int(np.floor(time / hop_length) + 1)  # Align with NumPy: 1413 frames
+    features_len = torch.tensor([num_frames], dtype=torch.long).numpy().astype(np.int64)
 
     # Создаем спектрограмму
     spectrogram_transform = T.Spectrogram(
@@ -40,6 +45,9 @@ def preprocess_audio(audio_tensor: torch.Tensor, audio_len: torch.Tensor) -> Tup
     ).to(audio_tensor.device)
     spectrogram = spectrogram_transform(audio_tensor)  # [batch, freq, time]
 
+    if spectrogram.shape[-1] != num_frames:
+        spectrogram = spectrogram[:, :, :num_frames]
+
     # Создаем Mel-фильтры
     mel_transform = T.MelScale(
         n_mels=n_mels,
@@ -49,16 +57,21 @@ def preprocess_audio(audio_tensor: torch.Tensor, audio_len: torch.Tensor) -> Tup
         n_stft=n_fft // 2 + 1
     ).to(audio_tensor.device)
     mel_spec = mel_transform(spectrogram)  # [batch, n_mels, time]
+    print(f"Melspec Torch: {mel_spec}")
+
 
     # Логарифмирование и CMVN
     log_mel_spec = torch.log(mel_spec + log_zero_guard_value)
+    print(f"log_mel_spec Torch: {mel_spec}")
+    np.save("mel_spec_torch_raw.npy", log_mel_spec.numpy())
     mean = log_mel_spec.mean(dim=2, keepdim=True)
     std = log_mel_spec.std(dim=2, keepdim=True)
     log_mel_spec = (log_mel_spec - mean) / (std + 1e-6)
-
+    np.save("mel_spec_torch_cmvn.npy", log_mel_spec.numpy())
+    print(f"After CMVN: mean={log_mel_spec.mean().item()}, std={log_mel_spec.std().item()}")
     # Передаем в формате [batch, n_mels, time]
     features = log_mel_spec.numpy().astype(np.float32)
-    features_len = (audio_len / hop_length + 1).long().numpy().astype(np.int64)
+    # features_len = (audio_len / hop_length + 1).long().numpy().astype(np.int64)
     return features, features_len
 
 # Загрузка вокабуляра
