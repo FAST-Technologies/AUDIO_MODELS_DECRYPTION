@@ -1,106 +1,31 @@
+from typing import List, Tuple, Dict
+import re
+import os
+from datetime import datetime
+from dataclasses import dataclass
 import torch
 import numpy as np
 import onnxruntime as rt
 import torchaudio.transforms as T
 import matplotlib.pyplot as plt
-from typing import List, Tuple, Dict
-import re
+
 from MetricsClass import return_metrics
 
-# Параметры предобработки
-sample_rate = 16_000
-n_fft = 400
-win_length = 400
-hop_length = 160
-n_mels = 80
-features = 80
-preemph = 0.97
-log_zero_guard_value = 2 ** -24
-vocab_path = "onnx_models/vocab-stt_ru_fastconformer_hybrid_large_pc_RNNT.txt"
+@dataclass(frozen=True)
+class Constants:
+    sample_rate: int = 16_000
+    n_fft: int = 400
+    win_length: int = 400
+    hop_length: int = 160
+    n_mels: int = 80
+    features: int = 80
+    preemph: float = 0.97
+    hidden_size: int = 640
+    log_zero_guard_value: float = 2 ** -24
+    ru_vocab_length: int = 1025
 
-def preprocess_audio(audio_tensor: torch.Tensor,
-                     audio_len: torch.Tensor
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Preprocess raw audio tensor to extract log-mel spectrogram features.
+graphics_dir = "Graphics"
 
-    Parameters
-    ----------
-    audio_tensor : Tensor
-        Raw audio signal tensor, expected shape [batch, time].
-    audio_len : Tensor
-        Lengths of the input audio signals, expected shape [batch].
-
-    Returns
-    -------
-    Tuple[np.ndarray, np.ndarray]
-        A tuple containing:
-        - Log-mel spectrogram features, shape [batch, n_mels, time_frames].
-        - Output lengths after feature extraction, shape [batch].
-
-    Notes
-    -----
-    - Applies normalization using mean and standard deviation.
-    - Performs pre-emphasis to enhance higher frequencies.
-    - Computes spectrogram using Torchaudio's `Spectrogram` with a Hann window.
-    - Applies Mel-scale transformation followed by logarithmic scaling.
-    - Clamps values with `log_zero_guard_value` to avoid numerical issues during log computation.
-    """
-    # Применяем нормализацию
-    mean = audio_tensor.mean()
-    std = audio_tensor.std()
-    if std == 0:
-        std = 1e-6
-    print(f"Mean before CMVN: {mean.item()}, Std before CMVN: {std.item()}")
-    audio_tensor = (audio_tensor - mean) / (std + 1e-6)
-
-    # Преэмфазис
-    if preemph != 0.0:
-        audio_tensor = torch.cat([audio_tensor[:, :1], audio_tensor[:, 1:] - preemph * audio_tensor[:, :-1]], dim=-1)
-
-    time = audio_len.item()
-    num_frames = int(np.floor(time / hop_length) + 1)  # Align with NumPy: 1413 frames
-    features_len = torch.tensor([num_frames], dtype=torch.long).numpy().astype(np.int64)
-
-    # Создаем спектрограмму
-    spectrogram_transform = T.Spectrogram(
-        n_fft=n_fft,
-        win_length=win_length,
-        hop_length=hop_length,
-        window_fn=torch.hann_window,
-        power=2.0
-    ).to(audio_tensor.device)
-    spectrogram = spectrogram_transform(audio_tensor)  # [batch, freq, time]
-
-    if spectrogram.shape[-1] != num_frames:
-        spectrogram = spectrogram[:, :, :num_frames]
-
-    # Создаем Mel-фильтры
-    mel_transform = T.MelScale(
-        n_mels=n_mels,
-        sample_rate=sample_rate,
-        f_min=0,
-        f_max=sample_rate // 2,
-        n_stft=n_fft // 2 + 1
-    ).to(audio_tensor.device)
-    mel_spec = mel_transform(spectrogram)  # [batch, n_mels, time]
-    print(f"Melspec Torch: {mel_spec}")
-
-
-    # Логарифмирование и CMVN
-    log_mel_spec = torch.log(mel_spec + log_zero_guard_value)
-    print(f"log_mel_spec Torch: {mel_spec}")
-    np.save("mel_spec_torch_raw.npy", log_mel_spec.numpy())
-    mean = log_mel_spec.mean(dim=2, keepdim=True)
-    std = log_mel_spec.std(dim=2, keepdim=True)
-    log_mel_spec = (log_mel_spec - mean) / (std + 1e-6)
-    np.save("mel_spec_torch_cmvn.npy", log_mel_spec.numpy())
-    print(f"After CMVN: mean={log_mel_spec.mean().item()}, std={log_mel_spec.std().item()}")
-    # Передаем в формате [batch, n_mels, time]
-    features = log_mel_spec.numpy().astype(np.float32)
-    # features_len = (audio_len / hop_length + 1).long().numpy().astype(np.int64)
-    return features, features_len
-
-# Загрузка вокабуляра
 def load_vocab(vocab_path: str) -> List[str]:
     """Load vocabulary from a file into a list of tokens.
 
@@ -131,14 +56,109 @@ def load_vocab(vocab_path: str) -> List[str]:
                 vocab[idx] = token
             elif len(parts) == 1:
                 vocab.append(parts[0])
-    while len(vocab) < 1025:
+    while len(vocab) < Constants.ru_vocab_length:
         vocab.append("<pad>")
     return vocab
+
+class PyTorchPreprocessor:
+    def __init__(self) -> None:
+        """Initialize the audio preprocessor with Torchaudio-based transformations.
+        """
+        self.sample_rate = Constants.sample_rate
+        self.n_fft = Constants.n_fft
+        self.win_length = Constants.win_length
+        self.hop_length = Constants.hop_length
+        self.n_mels = Constants.n_mels
+        self.preemph = Constants.preemph
+        self.log_zero_guard_value = Constants.log_zero_guard_value
+
+    def preprocess_audio(self,
+                         audio_tensor: torch.Tensor,
+                         audio_len: torch.Tensor
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Preprocess raw audio tensor to extract log-mel spectrogram features.
+
+        Parameters
+        ----------
+        audio_tensor : Tensor
+            Raw audio signal tensor, expected shape [batch, time].
+        audio_len : Tensor
+            Lengths of the input audio signals, expected shape [batch].
+
+        Returns
+        -------
+        Tuple[np.ndarray, np.ndarray]
+            A tuple containing:
+            - Log-mel spectrogram features, shape [batch, n_mels, time_frames].
+            - Output lengths after feature extraction, shape [batch].
+
+        Notes
+        -----
+        - Applies normalization using mean and standard deviation.
+        - Performs pre-emphasis to enhance higher frequencies.
+        - Computes spectrogram using Torchaudio's `Spectrogram` with a Hann window.
+        - Applies Mel-scale transformation followed by logarithmic scaling.
+        - Clamps values with `log_zero_guard_value` to avoid numerical issues during log computation.
+        """
+        # Применяем нормализацию
+        mean = audio_tensor.mean()
+        std = audio_tensor.std()
+        if std == 0:
+            std = 1e-6
+        print(f"Mean before CMVN: {mean.item()}, Std before CMVN: {std.item()}")
+        audio_tensor = (audio_tensor - mean) / (std + 1e-6)
+
+        # Преэмфазис
+        if Constants.preemph != 0.0:
+            audio_tensor = torch.cat([audio_tensor[:, :1], audio_tensor[:, 1:] - Constants.preemph * audio_tensor[:, :-1]], dim=-1)
+
+        time = audio_len.item()
+        num_frames = int(np.floor(time / Constants.hop_length) + 1)
+        features_len = torch.tensor([num_frames], dtype=torch.long).numpy().astype(np.int64)
+
+        # Создаем спектрограмму
+        spectrogram_transform = T.Spectrogram(
+            n_fft=Constants.n_fft,
+            win_length=Constants.win_length,
+            hop_length=Constants.hop_length,
+            window_fn=torch.hann_window,
+            power=2.0
+        ).to(audio_tensor.device)
+        spectrogram = spectrogram_transform(audio_tensor)
+
+        if spectrogram.shape[-1] != num_frames:
+            spectrogram = spectrogram[:, :, :num_frames]
+
+        # Создаем Mel-фильтры
+        mel_transform = T.MelScale(
+            n_mels=Constants.n_mels,
+            sample_rate=Constants.sample_rate,
+            f_min=0,
+            f_max=Constants.sample_rate // 2,
+            n_stft=Constants.n_fft // 2 + 1
+        ).to(audio_tensor.device)
+        mel_spec = mel_transform(spectrogram)
+
+        # Логарифмирование и CMVN
+        log_mel_spec = torch.log(mel_spec + Constants.log_zero_guard_value)
+        np.save("mel_spec_torch_raw.npy", log_mel_spec.numpy())
+        mean = log_mel_spec.mean(dim=2,
+                                 keepdim=True)
+        std = log_mel_spec.std(dim=2,
+                               keepdim=True)
+        log_mel_spec = (log_mel_spec - mean) / (std + 1e-6)
+        np.save("mel_spec_torch_cmvn.npy", log_mel_spec.numpy())
+        print(f"After CMVN: mean={log_mel_spec.mean().item()}, std={log_mel_spec.std().item()}")
+        features = log_mel_spec.numpy().astype(np.float32)
+        return features, features_len
 
 class RnntASRPyTorch:
     def __init__(self,
                  encoder_path: str,
-                 decoder_joint_path: str):
+                 decoder_joint_path: str,
+                 vocab_path: str,
+                 graphics_create: bool = False,
+    ) -> None:
         """Initialize the RNN-T ASR model with ONNX encoder and decoder-joint components.
 
         Parameters
@@ -153,13 +173,16 @@ class RnntASRPyTorch:
         - Sets up model inputs and outputs based on ONNX session metadata.
         - Loads vocabulary and initializes token indices for special tokens.
         """
-        self.features = features
-        self.hidden_size = 640
-        self._encoder = rt.InferenceSession(encoder_path, providers=["CPUExecutionProvider"])
-        self._decoder_joint = rt.InferenceSession(decoder_joint_path, providers=["CPUExecutionProvider"])
+        self.features = Constants.features
+        self.hidden_size = Constants.hidden_size
+        self._encoder = rt.InferenceSession(encoder_path,
+                                            providers=["CPUExecutionProvider"])
+        self._decoder_joint = rt.InferenceSession(decoder_joint_path,
+                                                  providers=["CPUExecutionProvider"])
         self.vocab = load_vocab(vocab_path)
         self._setup_token_indices()
         self._print_model_info()
+        self.graphics_create = graphics_create
 
         self._encoder_input_name = self._encoder.get_inputs()[0].name
         self._encoder_length_name = self._encoder.get_inputs()[1].name
@@ -181,10 +204,10 @@ class RnntASRPyTorch:
         - Identifies indices for blank, unknown, and padding tokens.
         - Populates a set of tokens to filter during decoding.
         """
-        self._blank_idx = self.vocab.index("<blk>") if "<blk>" in self.vocab else 1024
-        self._unk_idx = self.vocab.index("<unk>") if "<unk>" in self.vocab else 1024
+        self._blank_idx = self.vocab.index("<blk>") if "<blk>" in self.vocab else Constants.ru_vocab_length - 1
+        self._unk_idx = self.vocab.index("<unk>") if "<unk>" in self.vocab else Constants.ru_vocab_length - 1
         self._blk_idx = self._blank_idx
-        self._pad_idx = self.vocab.index("<pad>") if "<pad>" in self.vocab else 1024
+        self._pad_idx = self.vocab.index("<pad>") if "<pad>" in self.vocab else Constants.ru_vocab_length - 1
         self._max_vocab_idx = len(self.vocab) - 1
         self._tokens_to_filter = {self._blank_idx, self._unk_idx, self._blk_idx, self._pad_idx}
         for i in range(self._max_vocab_idx + 1, len(self.vocab)):
@@ -226,7 +249,9 @@ class RnntASRPyTorch:
         for tensor in tensors:
             print(f"Name: {tensor.name}, Shape: {tensor.shape}")
 
-    def out_len(self, input_lengths: np.ndarray) -> np.ndarray:
+    def out_len(self,
+                input_lengths: np.ndarray
+    ) -> np.ndarray:
         """Calculate output length after feature extraction based on input audio length.
 
         Parameters
@@ -267,7 +292,7 @@ class RnntASRPyTorch:
 
         Notes
         -----
-        - Delegates to `preprocess_audio` for feature computation.
+        - Delegates to `AudioPreprocessor` for feature computation.
         - Visualizes the spectrogram using matplotlib for inspection.
         - Checks for NaN or Inf values in the input signal.
         """
@@ -275,16 +300,23 @@ class RnntASRPyTorch:
         if torch.isnan(input_signal).any() or torch.isinf(input_signal).any():
             print("Warning: input_signal contains NaN or Inf values!")
 
-        features, features_len = preprocess_audio(input_signal, length)
+        preprocessor = PyTorchPreprocessor()
+        features, features_len = preprocessor.preprocess_audio(input_signal, length)
 
-        plt.figure(figsize=(10, 4))
-        plt.imshow(features[0], aspect="auto", origin="lower", interpolation="nearest")
-        plt.colorbar(label="Normalized Log Mel Energy")
-        plt.title("Mel-Spectrogram (After Normalization)")
-        plt.xlabel("Time Frames")
-        plt.ylabel("Mel Frequency Bins")
-        plt.tight_layout()
-        plt.show()
+        if self.graphics_create:
+            if not os.path.exists(graphics_dir):
+                os.makedirs(graphics_dir)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{graphics_dir}/mel_spectrogram_PyTorch_{timestamp}.png"
+            plt.figure(figsize=(10, 4))
+            plt.imshow(features[0], aspect="auto", origin="lower", interpolation="nearest")
+            plt.colorbar(label="Normalized Log Mel Energy")
+            plt.title("Mel-Spectrogram (After Normalization)")
+            plt.xlabel("Time Frames")
+            plt.ylabel("Mel Frequency Bins")
+            plt.tight_layout()
+            plt.savefig(filename)
+            plt.close()
 
         return torch.from_numpy(features), torch.from_numpy(features_len)
 
@@ -322,7 +354,7 @@ class RnntASRPyTorch:
                 prev_tokens: List[int],
                 prev_state: Tuple[np.ndarray, np.ndarray],
                 encoder_out: np.ndarray
-    ) -> Tuple[np.ndarray, int, Tuple[np.ndarray, np.ndarray]]:
+                ) -> Tuple[np.ndarray, int, Tuple[np.ndarray, np.ndarray]]:
         """Decode a single step using the ONNX decoder-joint model.
 
         Parameters
@@ -355,84 +387,30 @@ class RnntASRPyTorch:
             "input_states_1": prev_state[0],
             "input_states_2": prev_state[1],
         }
+        print(f"Decode step t={len(prev_tokens)}: encoder_out shape = {encoder_out.shape}, prev_token = {prev_token}")
+
+        if encoder_out.shape[2] == 0:
+            print(f"Error: encoder_out is empty at t={len(prev_tokens)}, returning dummy logits")
+            dummy_logits = np.zeros((len(self.vocab),), dtype=np.float32)
+            return dummy_logits, -1, (prev_state[0], prev_state[1])
+
         outputs = self._decoder_joint.run(
             ["outputs", "output_states_1", "output_states_2"],
             inputs
         )
         logits = np.squeeze(outputs[0])
-        return logits, -1, (outputs[1], outputs[2])
-
-    @torch.inference_mode()
-    def decode_step(self,
-                    encoder_output: np.ndarray,
-                    prev_token: np.ndarray,
-                    state: Tuple[np.ndarray, np.ndarray],
-                    t: int
-    ) -> Tuple[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
-        """Perform a single decoding step using the ONNX decoder-joint model.
-
-        Parameters
-        ----------
-        encoder_output : np.ndarray
-            Encoded output, shape [batch, hidden_size, time].
-        prev_token : np.ndarray
-            Previous token ID, shape [1, 1].
-        state : Tuple[np.ndarray, np.ndarray]
-            Previous decoder states, shape [(1, 1, hidden_size), (1, 1, hidden_size)].
-        t : int
-            Current time step index.
-
-        Returns
-        -------
-        Tuple[np.ndarray, Tuple[np.ndarray, np.ndarray]]
-            A tuple containing:
-            - Logits for the current step, shape [1, 1, 1, vocab_size].
-            - Updated decoder states.
-
-        Notes
-        -----
-        - Handles empty encoder output with dummy logits.
-        - Prints debug information for logits and top-5 non-blank tokens.
-        """
-        state1, state2 = state
-        target_length = np.array([1], dtype=np.int32)
-        encoder_output_t = encoder_output[:, :, t:t + 1]
-        print(f"Decode step t={t}: encoder_output_t shape = {encoder_output_t.shape}, prev_token = {prev_token}")
-
-        if encoder_output_t.shape[2] == 0:
-            print(f"Error: encoder_output_t is empty at t={t}, returning dummy logits")
-            dummy_logits = np.zeros((1, 1, 1, len(self.vocab)), dtype=np.float32)
-            return dummy_logits, (state1, state2)
-
-        inputs = {
-            self._decoder_input_name: encoder_output_t,
-            self._decoder_prev_token_name: prev_token.astype(np.int32),
-            self._decoder_joint.get_inputs()[2].name: target_length,
-            self._decoder_joint.get_inputs()[3].name: state1,
-            self._decoder_joint.get_inputs()[4].name: state2
-        }
-        outputs = self._decoder_joint.run(
-            [self._decoder_output_name,
-             self._decoder_joint.get_outputs()[2].name,
-             self._decoder_joint.get_outputs()[3].name],
-            inputs
-        )
-        logits = outputs[0]
         print(f"Raw logits min: {logits.min()}, max: {logits.max()}")
-        # logits = logits - np.max(logits)
-
-        logits_t = logits[0, 0, 0].copy()
-        print(f"DEBUG: t={t}, raw logits_t for blank {self._blank_idx}: {logits_t[self._blank_idx]:.4f}")
-        non_blank_logits = np.delete(logits_t, self._blank_idx)
+        print(f"DEBUG: t={len(prev_tokens)}, raw logits_t for blank {self._blank_idx}: {logits[self._blank_idx]:.4f}")
+        non_blank_logits = np.delete(logits, self._blank_idx)
         non_blank_vocab_indices = np.delete(np.arange(len(self.vocab)), self._blank_idx)
         k_val = min(5, len(non_blank_logits))
         top_5_raw_indices_in_non_blank_array = np.argsort(non_blank_logits)[-k_val:]
         top_5_raw_indices = non_blank_vocab_indices[top_5_raw_indices_in_non_blank_array]
-
         print("DEBUG: t={t}, top 5 raw non-blank logits: " +
-              ", ".join([f"{self.vocab[idx]}:{logits_t[idx]:.4f}" for idx in top_5_raw_indices]))
+              ", ".join([f"{self.vocab[idx]}:{logits[idx]:.4f}" for idx in top_5_raw_indices]).replace("{t}", str(len(
+                  prev_tokens))))
 
-        return logits, (outputs[1], outputs[2])
+        return logits, -1, (outputs[1], outputs[2])
 
     def decode_rnnt_greedy_improved(self,
                                     encoder_output: np.ndarray,
@@ -495,14 +473,14 @@ class RnntASRPyTorch:
                 token_str = self.vocab[next_token] if next_token < len(self.vocab) else 'OUT_OF_VOCAB'
                 print(f"Step {t}: token={next_token}('{token_str}'), prob={probs[next_token]:.3f}")
 
-        text = self._postprocess_improved(hyp, "GD")
+        text = self._postprocess_improved(hyp, "greedy")
         metrics = {}
         if ground_truth and text:
             metrics = return_metrics(transcription=text,
                                      ground_truth=ground_truth,
                                      metrics=metrics,
                                      total_log_prob=0.0,
-                                     flag="improved_greedy")
+                                     flag="greedy")
         return text, metrics, [t for t in range(len(hyp))]
 
     def decode_rnnt_beam_search_fixed(self,
@@ -566,7 +544,6 @@ class RnntASRPyTorch:
             state = (np.zeros((1, 1, self.hidden_size), dtype=np.float32),
                      np.zeros((1, 1, self.hidden_size), dtype=np.float32))
 
-        # Инициализируем beam с пустой последовательностью и начальным токеном
         beams = [(tuple(), 0.0, state, [], 0, 0, [])]
         temperature = 0.8
         blank_penalty = -2.0
@@ -655,7 +632,7 @@ class RnntASRPyTorch:
         print(f"Best raw sequence (token IDs): {best_seq}")
         print(f"Mapped raw sequence: {[vocab[idx] for idx in best_seq if idx < len(vocab)]}")
 
-        text = self._postprocess_improved(list(best_seq), "BS")
+        text = self._postprocess_improved(list(best_seq), "beam")
 
         print(f"Fixed Beam Search completed:")
         print(f"  Transcription: '{text}'")
@@ -674,15 +651,15 @@ class RnntASRPyTorch:
                 total_log_prob=best_score,
                 beam_width=beam_width,
                 length_penalty=length_penalty,
-                flag="BS"
+                flag="beam"
             )
 
         return text, metrics, timestamps
 
-    def _postprocess_improved(self,
-                              decoded_ids: List[int],
-                              flag: str = "GD"
-    ) -> str:
+    def _postprocess_uncleaned(self,
+                               decoded_ids: List[int],
+                               flag: str = "greedy"
+                               ) -> str:
         """Postprocess decoded token IDs into a cleaned text string.
 
         Parameters
@@ -690,7 +667,7 @@ class RnntASRPyTorch:
         decoded_ids : List[int]
             List of decoded token IDs from the model.
         flag : str, optional
-            Flag to indicate decoding method ('GD' or 'BS') for logging.
+            Flag to indicate decoding method ('greedy' or beam') for logging.
 
         Returns
         -------
@@ -701,8 +678,57 @@ class RnntASRPyTorch:
         -----
         - Filters out special tokens and applies word deduplication.
         - Normalizes whitespace and preserves double characters.
+        - Capitalizes the first letter for readability.
         """
-        valid_tokens = [self.vocab[tok_id] for tok_id in decoded_ids if tok_id < len(self.vocab) and tok_id not in {self._blank_idx, self._pad_idx}]
+        valid_tokens = [self.vocab[tok_id] for tok_id in decoded_ids if
+                        tok_id < len(self.vocab) and tok_id not in {self._blank_idx, self._pad_idx}]
+        text = "".join(valid_tokens).replace("▁", " ").strip()
+        text = re.sub(r'\s+', ' ', text)
+        text = re.sub(r'(.)\1{2,}', r'\1\1', text)  # Сохраняем двойные символы, как в PyTorch
+
+        words = text.split()
+        cleaned_words = []
+        last_word = None
+        for word in words:
+            if word and (not last_word or word.lower() != last_word.lower() or len(word) <= 2):
+                cleaned_words.append(word)
+                last_word = word
+
+        text = " ".join(cleaned_words).strip()
+        text = re.sub(r'(?<=\s)[.,!?]+$', '', text).strip()
+        text = text[0].upper() + text[1:] if text else text
+
+        if flag == "greedy":
+            print(f"Final transcription (Improved Greedy Decoding): '{text}'")
+        elif flag == "beam":
+            print(f"Final transcription (Improved Beam Search): '{text}'")
+        return text
+
+    def _postprocess_cleaned(self,
+                             decoded_ids: List[int],
+                             flag: str = "greedy"
+                             ) -> str:
+        """Alternative postprocessing method for decoded token IDs.
+
+        Parameters
+        ----------
+        decoded_ids : List[int]
+            List of decoded token IDs from the model.
+        flag : str, optional
+            Flag to indicate decoding method ('greedy' or 'beam') for logging.
+
+        Returns
+        -------
+        str
+            Cleaned and formatted transcription text.
+
+        Notes
+        -----
+        - Similar to `_postprocess_uncleaned` but with stricter punctuation removal.
+        - Preserves double characters and normalizes whitespace.
+        """
+        valid_tokens = [self.vocab[tok_id] for tok_id in decoded_ids if
+                        tok_id < len(self.vocab) and tok_id not in {self._blank_idx, self._pad_idx}]
         text = "".join(valid_tokens).replace("▁", " ").strip()
         text = re.sub(r'\s+', ' ', text)
         text = re.sub(r'(.)\1{2,}', r'\1\1', text)
@@ -717,58 +743,16 @@ class RnntASRPyTorch:
 
         text = " ".join(cleaned_words).strip()
         text = re.sub(r'[.,!?]$', '', text).strip()
-        if flag == "GD":
+
+        if flag == "greedy":
             print(f"Final transcription (Improved Greedy Decoding): '{text}'")
-        elif flag == "BS":
+        elif flag == "beam":
             print(f"Final transcription (Improved Beam Search): '{text}'")
-        return text
-
-    def _postprocess_tokens_conservative(self,
-                                         decoded_ids: List[int]
-    ) -> str:
-        """Conservatively postprocess decoded token IDs into a text string.
-
-        Parameters
-        ----------
-        decoded_ids : List[int]
-            List of decoded token IDs from the model.
-
-        Returns
-        -------
-        str
-            Cleaned and conservatively formatted transcription text.
-
-        Notes
-        -----
-        - Filters out special tokens and avoids consecutive duplicates.
-        - Normalizes whitespace and preserves double characters.
-        """
-        filtered_tokens = []
-        special_ids = {self._blank_idx, self._pad_idx}
-
-        for tok_id in decoded_ids:
-            if tok_id < len(self.vocab) and tok_id not in special_ids:
-                token = self.vocab[tok_id].strip()
-                if token and token not in filtered_tokens[-1:]:
-                    filtered_tokens.append(token)
-
-        text = "".join(filtered_tokens).replace("▁", " ").strip()
-        text = re.sub(r'\s+', ' ', text)
-        text = re.sub(r'(.)\1{2,}', r'\1\1', text)
-
-        words = text.split()
-        cleaned_words = []
-        for i in range(len(words)):
-            if i == 0 or words[i] != words[i - 1]:
-                cleaned_words.append(words[i])
-
-        text = " ".join(cleaned_words).strip()
-        print(f"Final transcription (Improved Beam): '{text}'")
         return text
 
     def recognize(self,
                   waveforms: np.ndarray,
-                  decode_flag: str = "GD",
+                  decode_flag: str = "greedy",
                   ground_truth: str = None,
                   max_steps: int = 3000,
                   min_tokens: int = 15,
@@ -783,7 +767,7 @@ class RnntASRPyTorch:
         waveforms : np.ndarray
             Raw audio waveforms, expected shape [time] or [channels, time].
         decode_flag : str, optional
-            Decoding method ('GD' for greedy, 'BS' for beam search) (default: 'GD').
+            Decoding method ('greedy' for greedy, 'beam' for beam search) (default: 'greedy').
         ground_truth : str, optional
             Ground truth transcription for metric computation.
         max_steps : int, optional
@@ -827,7 +811,6 @@ class RnntASRPyTorch:
         if torch.isnan(audio_tensor).any() or torch.isinf(audio_tensor).any():
             print("Warning: audio_tensor contains NaN or Inf values!")
 
-        # Вычисляем предсказанную длину выхода
         predicted_out_len = self.out_len(audio_length.numpy())
         print(f"Predicted output length: {predicted_out_len}")
 
@@ -836,14 +819,20 @@ class RnntASRPyTorch:
         if torch.isnan(features).any() or torch.isinf(features).any():
             print("Warning: features contain NaN or Inf values!")
 
-        plt.figure(figsize=(10, 4))
-        plt.imshow(features[0].cpu().numpy(), aspect="auto", origin="lower", interpolation="nearest")
-        plt.colorbar(label="Normalized Log Mel Energy")
-        plt.title("Mel-Spectrogram (After Normalization)")
-        plt.xlabel("Time Frames")
-        plt.ylabel("Mel Frequency Bins")
-        plt.tight_layout()
-        plt.show()
+        if self.graphics_create:
+            if not os.path.exists(graphics_dir):
+                os.makedirs(graphics_dir)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{graphics_dir}/mel_spectrogram_PyTorch_{timestamp}.png"
+            plt.figure(figsize=(10, 4))
+            plt.imshow(features[0].cpu().numpy(), aspect="auto", origin="lower", interpolation="nearest")
+            plt.colorbar(label="Normalized Log Mel Energy")
+            plt.title("Mel-Spectrogram (After Normalization)")
+            plt.xlabel("Time Frames")
+            plt.ylabel("Mel Frequency Bins")
+            plt.tight_layout()
+            plt.savefig(filename)
+            plt.close()
 
         features = features.detach().cpu().numpy().astype(np.float32)
         lengths = lengths.detach().cpu().numpy().astype(np.int64)
@@ -851,11 +840,11 @@ class RnntASRPyTorch:
         encoder_out_data, encoder_out_lengths = self._encode(features, lengths)
         print(f"Encoder output data shape: {encoder_out_data.shape}, lengths: {encoder_out_lengths}")
 
-        if decode_flag == "GD":
+        if decode_flag == "greedy":
             transcription, _, timestamps = self.decode_rnnt_greedy_improved(encoder_out_data,
                                                                             ground_truth,
                                                                             state_init)
-        elif decode_flag == "BS":
+        elif decode_flag == "beam":
             transcription, _, timestamps = self.decode_rnnt_beam_search_fixed(encoder_out_data,
                                                                               self.vocab,
                                                                               self._blank_idx,
@@ -866,6 +855,6 @@ class RnntASRPyTorch:
                                                                               min_tokens,
                                                                               state_init)
         else:
-            raise ValueError("decode_flag must be 'GD' or 'BS'")
+            raise ValueError("decode_flag must be 'greedy' or 'beam'")
 
         return transcription, timestamps

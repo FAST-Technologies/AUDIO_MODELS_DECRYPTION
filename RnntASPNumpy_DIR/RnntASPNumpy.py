@@ -1,176 +1,354 @@
+from typing import List, Tuple, Dict
+import re
+import os
+from datetime import datetime
 import numpy as np
 import onnxruntime as rt
 import matplotlib.pyplot as plt
-from typing import List, Tuple, Dict
-import re
-from MetricsClass import return_metrics
 from collections import defaultdict
+from dataclasses import dataclass
 
-# Параметры предобработки
-sample_rate = 16_000
-n_fft = 400
-win_length = 400
-hop_length = 160
-n_mels = 80
-features = 80
-preemph = 0.97
-log_zero_guard_value = 2 ** -24
-vocab_path = "onnx_models/vocab-stt_ru_fastconformer_hybrid_large_pc_RNNT.txt"
+from MetricsClass import return_metrics
 
+@dataclass(frozen=True)
+class Constants:
+    sample_rate: int = 16_000
+    n_fft: int = 400
+    win_length: int = 400
+    hop_length: int = 160
+    n_mels: int = 80
+    features: int = 80
+    preemph: float = 0.97
+    hidden_size: int = 640
+    log_zero_guard_value: float = 2 ** -24
+    ru_vocab_length: int = 1025
 
-def stft_numpy(signal,
-               n_fft=400,
-               hop_length=160,
-               win_length=400,
-               window='hann',
-               center=True):
-    """Compute the Short-Time Fourier Transform (STFT) of an audio signal.
+graphics_dir = "Graphics"
 
-    Parameters
-    ----------
-    signal : np.ndarray
-        Input audio signal, shape [time].
-    n_fft : int, optional
-        Number of FFT points (default: 400).
-    hop_length : int, optional
-        Hop length between frames in samples (default: 160).
-    win_length : int, optional
-        Window length in samples (default: 400).
-    window : str, optional
-        Window type, currently supports 'hann' (default: 'hann').
-    center : bool, optional
-        If True, pads the signal to center frames (default: True).
+class NumPyPreprocessor:
+    def __init__(self,
+                 graphics_create: bool = False,
+                 window: str = "hann",
+                 center: bool = True,
+                 mel_filterbank_type: str = "complex"):
+        """Initialize the NumPy-based audio preprocessor."""
+        self.sample_rate = Constants.sample_rate
+        self.n_fft = Constants.n_fft
+        self.win_length = Constants.win_length
+        self.hop_length = Constants.hop_length
+        self.n_mels = Constants.n_mels
+        self.preemph = Constants.preemph
+        self.log_zero_guard_value = Constants.log_zero_guard_value
+        self.graphics_create = graphics_create
+        self.window = window
+        self.center = center
+        self.mel_filterbank_type = mel_filterbank_type
 
-    Returns
-    -------
-    np.ndarray
-        STFT matrix, shape [n_fft // 2 + 1, n_frames], dtype complex128.
+    def stft_numpy(self,
+                   signal: np.ndarray,
+                   window: str = "hann"
+    ) -> np.ndarray:
+        """Compute the Short-Time Fourier Transform (STFT) of an audio signal.
 
-    Notes
-    -----
-    - Mimics PyTorch's STFT implementation for compatibility.
-    - Applies a Hann window by default, with padding to center frames.
-    - Returns only the positive frequency components (n_fft // 2 + 1).
-    """
-    if window == 'hann':
-        win = np.hanning(win_length)
-    else:
-        win = np.ones(win_length)
+        Parameters
+        ----------
+        signal : np.ndarray
+            Input audio signal, shape [time].
+        n_fft : int, optional
+            Number of FFT points (default: 400).
+        hop_length : int, optional
+            Hop length between frames in samples (default: 160).
+        win_length : int, optional
+            Window length in samples (default: 400).
+        window : str, optional
+            Window type, supports 'hann', 'hamming', 'blackman' (default: 'hann').
+        center : bool, optional
+            If True, pads the signal to center frames (default: True).
 
-    # Padding как в PyTorch
-    if center:
-        pad_amount = n_fft // 2
-        signal = np.pad(signal, pad_amount, mode='reflect')
+        Returns
+        -------
+        np.ndarray
+            STFT matrix, shape [n_fft // 2 + 1, n_frames], dtype complex128.
 
-    # Количество фреймов
-    n_frames = 1 + (len(signal) - n_fft) // hop_length
+        Notes
+        -----
+        - Supports 'hann', 'hamming', and 'blackman' window types.
+        - Applies padding to center frames when center=True.
+        - Returns only positive frequency components.
+        """
+        if self.window == 'hann':
+            win = np.hanning(self.win_length)
+        elif self.window == 'hamming':
+            win = np.hamming(self.win_length)
+        elif self.window == 'blackman':
+            win = np.blackman(self.win_length)
+        else:
+            win = np.ones(self.win_length)
 
-    # Инициализация результата
-    stft_matrix = np.zeros((n_fft // 2 + 1, n_frames), dtype=np.complex128)
+        # Padding
+        if self.center:
+            pad_amount = self.n_fft // 2
+            signal = np.pad(signal,
+                            pad_amount,
+                            mode='reflect')
 
-    # Вычисление STFT
-    for i in range(n_frames):
-        start = i * hop_length
-        end = start + n_fft
+        # Количество фреймов
+        n_frames = 1 + (len(signal) - self.n_fft) // self.hop_length
 
-        if end <= len(signal):
-            frame = signal[start:end]
+        # Инициализация результата
+        stft_matrix = np.zeros((self.n_fft // 2 + 1, n_frames),
+                               dtype=np.complex128)
 
-            # Применяем окно (только если длина совпадает)
-            if len(frame) == win_length:
-                frame = frame * win
-            elif len(frame) == n_fft and win_length != n_fft:
-                # Дополняем или обрезаем окно
-                if win_length < n_fft:
-                    win_padded = np.pad(win, (0, n_fft - win_length), mode='constant')
+        # Вычисление STFT
+        for i in range(n_frames):
+            start = i * self.hop_length
+            end = start + self.n_fft
+
+            if end <= len(signal):
+                frame = signal[start:end]
+
+                # Применяем окно
+                if len(frame) == self.win_length:
+                    frame = frame * win
+                elif len(frame) == self.n_fft and self.win_length != self.n_fft:
+                    # Дополняем или обрезаем окно
+                    if self.win_length < self.n_fft:
+                        win_padded = np.pad(win,
+                                            (0, self.n_fft - self.win_length),
+                                            mode='constant')
+                    else:
+                        win_padded = win[:self.n_fft]
+                    frame = frame * win_padded
                 else:
-                    win_padded = win[:n_fft]
-                frame = frame * win_padded
-            else:
-                frame = frame * win
+                    frame = frame * win
 
-            # FFT
-            fft_frame = np.fft.fft(frame, n=n_fft)
-            stft_matrix[:, i] = fft_frame[:n_fft // 2 + 1]
+                # FFT
+                fft_frame = np.fft.fft(frame,
+                                       n=self.n_fft)
+                stft_matrix[:, i] = fft_frame[:self.n_fft // 2 + 1]
 
-    return stft_matrix
+        return stft_matrix
 
+    def create_mel_filterbank_torch_compatible(self) -> np.ndarray:
+        """Create a Mel filterbank compatible with torchaudio.MelScale.
+        Returns
+        -------
+        np.ndarray
+            Mel filterbank matrix, shape [n_mels, n_fft // 2 + 1], dtype float32.
 
-def create_mel_filterbank_torch_compatible(sr=16000,
-                                           n_fft=400,
-                                           n_mels=80,
-                                           fmin=0.0,
-                                           fmax=None):
-    """Create a Mel filterbank compatible with torchaudio.MelScale.
+        Notes
+        -----
+        - Uses the HTK Mel scale formula as in torchaudio.
+        - Normalizes filters using the 'slaney' method for area normalization.
+        """
+        fmax = self.sample_rate / 2.0
+        n_freqs = self.n_fft // 2 + 1
 
-    Parameters
-    ----------
-    sr : int, optional
-        Sampling rate of the audio (default: 16000).
-    n_fft : int, optional
-        Number of FFT points (default: 400).
-    n_mels : int, optional
-        Number of Mel filters (default: 80).
-    fmin : float, optional
-        Minimum frequency for Mel scale (default: 0.0).
-    fmax : float, optional
-        Maximum frequency for Mel scale (default: sr / 2.0).
+        # Mel scale conversion (HTK=False, как в torchaudio по умолчанию)
+        def hz_to_mel(hz):
+            return 2595.0 * np.log10(1.0 + hz / 700.0)
 
-    Returns
-    -------
-    np.ndarray
-        Mel filterbank matrix, shape [n_mels, n_fft // 2 + 1], dtype float32.
+        def mel_to_hz(mel):
+            return 700.0 * (10.0 ** (mel / 2595.0) - 1.0)
 
-    Notes
-    -----
-    - Uses the HTK Mel scale formula as in torchaudio.
-    - Normalizes filters using the 'slaney' method for area normalization.
-    """
-    if fmax is None:
-        fmax = sr / 2.0
+        # Создаем точки в mel шкале
+        mel_min = hz_to_mel(0.0)
+        mel_max = hz_to_mel(fmax)
+        mel_points = np.linspace(mel_min, mel_max, self.n_mels + 2)
+        hz_points = mel_to_hz(mel_points)
 
-    n_freqs = n_fft // 2 + 1
+        # Частоты для FFT bins
+        fft_freqs = np.linspace(0, fmax, n_freqs)
 
-    # Mel scale conversion (HTK=False, как в torchaudio по умолчанию)
-    def hz_to_mel(hz):
-        return 2595.0 * np.log10(1.0 + hz / 700.0)
+        # Создаем фильтр банк
+        filterbank = np.zeros((self.n_mels, n_freqs))
+        for m in range(self.n_mels):
+            left = hz_points[m]
+            center = hz_points[m + 1]
+            right = hz_points[m + 2]
+            for k in range(n_freqs):
+                freq = fft_freqs[k]
+                if left <= freq <= center and center != left:
+                    filterbank[m, k] = (freq - left) / (center - left)
+                elif center < freq <= right and right != center:
+                    filterbank[m, k] = (right - freq) / (right - center)
 
-    def mel_to_hz(mel):
-        return 700.0 * (10.0 ** (mel / 2595.0) - 1.0)
+        # Нормализация
+        # Нормализуем каждый фильтр по его площади
+        enorm = 2.0 / (hz_points[2:self.n_mels + 2] - hz_points[:self.n_mels])
+        filterbank *= enorm[:, np.newaxis]
+        return filterbank.astype(np.float32)
 
-    # Создаем точки в mel шкале
-    mel_min = hz_to_mel(fmin)
-    mel_max = hz_to_mel(fmax)
-    mel_points = np.linspace(mel_min, mel_max, n_mels + 2)
-    hz_points = mel_to_hz(mel_points)
+    def _create_mel_filterbank_simple(self) -> np.ndarray:
+        """Create a Mel filterbank compatible with torchaudio.MelScale.
 
-    # Частоты для FFT bins
-    fft_freqs = np.linspace(0, fmax, n_freqs)
+        Returns
+        -------
+        np.ndarray
+            Mel filterbank matrix, shape [n_mels, n_fft // 2 + 1], dtype float32.
 
-    # Создаем фильтр банк
-    filterbank = np.zeros((n_mels, n_freqs))
+        Notes
+        -----
+        - Uses a simplified Mel scale formula with linear spacing.
+        - Normalizes each filter to sum to 1 for consistency.
+        """
+        n_freqs = int(Constants.n_fft // 2 + 1)
+        f_min, f_max = 0.0, Constants.sample_rate / 2.0
 
-    for m in range(n_mels):
-        left = hz_points[m]
-        center = hz_points[m + 1]
-        right = hz_points[m + 2]
+        # Используем формулу mel scale как в torchaudio
+        mel_min = 1125.0 * np.log1p(f_min / 700.0)
+        mel_max = 1125.0 * np.log1p(f_max / 700.0)
+        mel_points = np.linspace(mel_min, mel_max, Constants.n_mels + 2)
+        freq_points = 700.0 * (np.expm1(mel_points / 1125.0))
 
-        # Находим соответствующие индексы в FFT
-        for k in range(n_freqs):
-            freq = fft_freqs[k]
-            if left <= freq <= center and center != left:
-                filterbank[m, k] = (freq - left) / (center - left)
-            elif center < freq <= right and right != center:
-                filterbank[m, k] = (right - freq) / (right - center)
+        # Создаем банк фильтров
+        fb = np.zeros((Constants.n_mels, n_freqs))
+        freqs = np.linspace(0, f_max, n_freqs)
 
-    # Нормализация как в torchaudio (тип 'slaney')
-    # Нормализуем каждый фильтр по его площади
-    enorm = 2.0 / (hz_points[2:n_mels + 2] - hz_points[:n_mels])
-    filterbank *= enorm[:, np.newaxis]
+        for m in range(Constants.n_mels):
+            f_left = freq_points[m]
+            f_center = freq_points[m + 1]
+            f_right = freq_points[m + 2]
 
-    return filterbank.astype(np.float32)
+            for f in range(n_freqs):
+                if f_left <= freqs[f] <= f_center and f_center != f_left:
+                    fb[m, f] = (freqs[f] - f_left) / (f_center - f_left)
+                elif f_center < freqs[f] <= f_right and f_right != f_center:
+                    fb[m, f] = (f_right - freqs[f]) / (f_right - f_center)
 
-# Загрузка вокабуляра
+        fb = fb / (np.sum(fb,
+                          axis=1,
+                          keepdims=True) + 1e-10)
+
+        return fb.astype(np.float32)
+
+    def extract_features(self, input_signal: np.ndarray, length: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Extract log-mel spectrogram features from the input audio signal.
+
+        Parameters
+        ----------
+        input_signal : np.ndarray
+            Input audio signal, shape [batch, channels, time].
+        length : np.ndarray
+            Lengths of the input audio signals, shape [batch].
+
+        Returns
+        -------
+        Tuple[np.ndarray, np.ndarray]
+            A tuple containing:
+            - Log-mel spectrogram features, shape [batch, n_mels, time_frames].
+            - Output lengths after feature extraction, shape [batch].
+        """
+        global mel_fb
+        print(f"input_signal shape: {input_signal.shape}, min: {np.min(input_signal)}, max: {np.max(input_signal)}")
+        if np.isnan(input_signal).any() or np.isinf(input_signal).any():
+            print("Warning: input_signal contains NaN or Inf values!")
+
+        mean = np.mean(input_signal)
+        std = np.std(input_signal)
+        if std == 0:
+            std = 1e-6
+        print(f"Mean before CMVN: {mean}, Std before CMVN: {std}")
+        input_signal = (input_signal - mean) / (std + 1e-6)
+
+        if Constants.preemph != 0.0:
+            batch_size, channels, time = input_signal.shape
+            for b in range(batch_size):
+                for c in range(channels):
+                    signal = input_signal[b, c]
+                    preemph_signal = np.concatenate([signal[:1], signal[1:] - Constants.preemph * signal[:-1]])
+                    input_signal[b, c] = preemph_signal
+
+        batch_size, channels, time = input_signal.shape
+        num_frames = int(np.floor(time / Constants.hop_length) + 1)
+        print(f"batch_size: {batch_size}, channels: {channels}, time: {time}, num_frames: {num_frames}")
+
+        if num_frames <= 0:
+            raise ValueError(
+                f"Signal length ({time}) is too short for STFT with n_fft={Constants.n_fft} and hop_length={Constants.hop_length}. "
+                f"Need at least {Constants.n_fft} samples."
+            )
+
+        if self.mel_filterbank_type == "complex":
+            mel_fb = self.create_mel_filterbank_torch_compatible()
+        elif self.mel_filterbank_type == "simple":
+            mel_fb = self._create_mel_filterbank_simple()
+        mel_specs = []
+
+        for b in range(batch_size):
+            for c in range(channels):
+                signal = input_signal[b, c]
+                # Выбираем окно в зависимости от self.window
+                if self.window == 'hamming':
+                    stft_result = self.stft_numpy(signal,
+                                                  window=self.window)
+                elif self.window == 'blackman':
+                    stft_result = self.stft_numpy(signal,
+                                                  window=self.window)
+                else:
+                    stft_result = self.stft_numpy(signal,
+                                                  window=self.window)
+
+                power_spec = np.abs(stft_result) ** 2
+                if power_spec.shape[1] > num_frames:
+                    power_spec = power_spec[:, :num_frames]
+                elif power_spec.shape[1] < num_frames:
+                    power_spec = np.pad(power_spec,
+                                        ((0, 0),
+                                         (0, num_frames - power_spec.shape[1])),
+                                        mode='constant',
+                                        constant_values=0)
+                mel_spec = np.dot(mel_fb, power_spec)
+                mel_specs.append(mel_spec)
+
+        mel_spectrogram = np.stack(mel_specs, axis=0).reshape(batch_size,
+                                                              channels,
+                                                              Constants.n_mels,
+                                                              num_frames)
+        print(f"Mel spectrogram shape: {mel_spectrogram.shape}")
+        print(f"Melspec NumPy: min={np.min(mel_spectrogram)}, max={np.max(mel_spectrogram)}")
+
+        log_mel_spec = np.log(mel_spectrogram + Constants.log_zero_guard_value)
+        print(f"log_mel_spec NumPy: min={np.min(log_mel_spec)}, max={np.max(log_mel_spec)}")
+        np.save("mel_spec_numpy_raw.npy", log_mel_spec)
+
+        mean = np.mean(log_mel_spec,
+                       axis=3,
+                       keepdims=True)
+        std = np.std(log_mel_spec,
+                     axis=3,
+                     keepdims=True)
+        log_mel_spec = (log_mel_spec - mean) / (std + 1e-6)
+        print(f"After CMVN: mean={np.mean(log_mel_spec)}, std={np.std(log_mel_spec)}")
+        np.save("mel_spec_numpy_cmvn.npy", log_mel_spec)
+
+        if channels == 1:
+            log_mel_spec = log_mel_spec.squeeze(1)
+
+        features = log_mel_spec.astype(np.float32)
+        features_len = np.array([num_frames],
+                                dtype=np.int64)
+
+        if self.graphics_create:
+            if not os.path.exists(graphics_dir):
+                os.makedirs(graphics_dir)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{graphics_dir}/mel_spectrogram_NumPy_{timestamp}.png"
+            plt.figure(figsize=(10, 4))
+            plt.imshow(features[0],
+                       aspect="auto",
+                       origin="lower",
+                       interpolation="nearest")
+            plt.colorbar(label="Normalized Log Mel Energy")
+            plt.title("Mel-Spectrogram (After CMVN)")
+            plt.xlabel("Time Frames")
+            plt.ylabel("Mel Frequency Bins")
+            plt.tight_layout()
+            plt.savefig(filename)
+            plt.close()
+
+        return features, features_len
+
 def load_vocab(vocab_path: str) -> List[str]:
     """Load vocabulary from a file into a list of tokens.
 
@@ -201,14 +379,20 @@ def load_vocab(vocab_path: str) -> List[str]:
                 vocab[idx] = token
             elif len(parts) == 1:
                 vocab.append(parts[0])
-    while len(vocab) < 1025:
+    while len(vocab) < Constants.ru_vocab_length:
         vocab.append("<pad>")
     return vocab
 
 class RnntASRNumPy:
     def __init__(self,
                  encoder_path: str,
-                 decoder_joint_path: str):
+                 decoder_joint_path: str,
+                 vocab_path: str,
+                 graphics_create: bool = False,
+                 window: str = "hann",
+                 center: bool = True,
+                 mel_filterbank_type: str = "complex"
+    ) -> None:
         """Initialize the RNN-T ASR model with ONNX encoder and decoder-joint components.
 
         Parameters
@@ -223,13 +407,17 @@ class RnntASRNumPy:
         - Sets up model inputs and outputs based on ONNX session metadata.
         - Loads vocabulary and initializes token indices for special tokens.
         """
-        self.features = features
-        self.hidden_size = 640
+        self.features = Constants.features
+        self.hidden_size = Constants.hidden_size
         self._encoder = rt.InferenceSession(encoder_path, providers=["CPUExecutionProvider"])
         self._decoder_joint = rt.InferenceSession(decoder_joint_path, providers=["CPUExecutionProvider"])
         self.vocab = load_vocab(vocab_path)
         self._setup_token_indices()
         self._print_model_info()
+        self.graphics_create = graphics_create
+        self.window = window
+        self.center = center
+        self.mel_filterbank_type = mel_filterbank_type
 
         self._encoder_input_name = self._encoder.get_inputs()[0].name
         self._encoder_length_name = self._encoder.get_inputs()[1].name
@@ -243,7 +431,7 @@ class RnntASRNumPy:
         for inp in self._decoder_joint.get_inputs():
             print(f"Name: {inp.name}, Shape: {inp.shape}, Type: {inp.type}")
 
-    def _setup_token_indices(self):
+    def _setup_token_indices(self) -> None:
         """Set up indices for special tokens in the vocabulary.
 
         Notes
@@ -251,16 +439,16 @@ class RnntASRNumPy:
         - Identifies indices for blank, unknown, and padding tokens.
         - Populates a set of tokens to filter during decoding.
         """
-        self._blank_idx = self.vocab.index("<blk>") if "<blk>" in self.vocab else 1024
-        self._unk_idx = self.vocab.index("<unk>") if "<unk>" in self.vocab else 1024
+        self._blank_idx = self.vocab.index("<blk>") if "<blk>" in self.vocab else Constants.ru_vocab_length - 1
+        self._unk_idx = self.vocab.index("<unk>") if "<unk>" in self.vocab else Constants.ru_vocab_length - 1
         self._blk_idx = self._blank_idx
-        self._pad_idx = self.vocab.index("<pad>") if "<pad>" in self.vocab else 1024
+        self._pad_idx = self.vocab.index("<pad>") if "<pad>" in self.vocab else Constants.ru_vocab_length - 1
         self._max_vocab_idx = len(self.vocab) - 1
         self._tokens_to_filter = {self._blank_idx, self._unk_idx, self._blk_idx, self._pad_idx}
         for i in range(self._max_vocab_idx + 1, len(self.vocab)):
             self._tokens_to_filter.add(i)
 
-    def _print_model_info(self):
+    def _print_model_info(self) -> None:
         """Print detailed information about the loaded vocabulary and token indices.
 
         Notes
@@ -315,54 +503,13 @@ class RnntASRNumPy:
         -----
         - Uses floor division with hop_length (160) to compute frame count.
         """
-        return np.floor_divide(input_lengths, hop_length) + 1
-
-    def _create_mel_filterbank(self) -> np.ndarray:
-        """Create a Mel filterbank compatible with torchaudio.MelScale.
-
-        Returns
-        -------
-        np.ndarray
-            Mel filterbank matrix, shape [n_mels, n_fft // 2 + 1], dtype float32.
-
-        Notes
-        -----
-        - Uses a simplified Mel scale formula with linear spacing.
-        - Normalizes each filter to sum to 1 for consistency.
-        """
-        n_freqs = int(n_fft // 2 + 1)
-        f_min, f_max = 0.0, sample_rate / 2.0
-
-        # Используем формулу mel scale как в torchaudio
-        mel_min = 1125.0 * np.log1p(f_min / 700.0)
-        mel_max = 1125.0 * np.log1p(f_max / 700.0)
-        mel_points = np.linspace(mel_min, mel_max, n_mels + 2)
-        freq_points = 700.0 * (np.expm1(mel_points / 1125.0))
-
-        # Создаем банк фильтров
-        fb = np.zeros((n_mels, n_freqs))
-        freqs = np.linspace(0, f_max, n_freqs)
-
-        for m in range(n_mels):
-            f_left = freq_points[m]
-            f_center = freq_points[m + 1]
-            f_right = freq_points[m + 2]
-
-            for f in range(n_freqs):
-                if f_left <= freqs[f] <= f_center and f_center != f_left:
-                    fb[m, f] = (freqs[f] - f_left) / (f_center - f_left)
-                elif f_center < freqs[f] <= f_right and f_right != f_center:
-                    fb[m, f] = (f_right - freqs[f]) / (f_right - f_center)
-
-        fb = fb / (np.sum(fb, axis=1, keepdims=True) + 1e-10)
-
-        return fb.astype(np.float32)
+        return np.floor_divide(input_lengths, Constants.hop_length) + 1
 
     def extract_features(self,
                          input_signal: np.ndarray,
                          length: np.ndarray
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """Extract log-mel spectrogram features from the input audio signal.
+        """Extract log-mel spectrogram features using the NumPyPreprocessor.
 
         Parameters
         ----------
@@ -377,131 +524,12 @@ class RnntASRNumPy:
             A tuple containing:
             - Log-mel spectrogram features, shape [batch, n_mels, time_frames].
             - Output lengths after feature extraction, shape [batch].
-
-        Notes
-        -----
-        - Normalizes the input signal using mean and standard deviation.
-        - Applies pre-emphasis to enhance higher frequencies.
-        - Computes STFT and converts to power spectrogram.
-        - Applies Mel filterbank and logarithmic scaling with CMVN.
-        - Visualizes the spectrogram using matplotlib for inspection.
         """
-        print(f"input_signal shape: {input_signal.shape}, min: {np.min(input_signal)}, max: {np.max(input_signal)}")
-        if np.isnan(input_signal).any() or np.isinf(input_signal).any():
-            print("Warning: input_signal contains NaN or Inf values!")
-
-        # Нормализация входного аудиосигнала (ТОЧНО как в PyTorch версии)
-        mean = np.mean(input_signal)
-        std = np.std(input_signal)
-        if std == 0:
-            std = 1e-6
-        print(f"Mean before CMVN: {mean}, Std before CMVN: {std}")
-        input_signal = (input_signal - mean) / (std + 1e-6)
-
-        # Предэмфазис
-        if preemph != 0.0:
-            batch_size, channels, time = input_signal.shape
-            for b in range(batch_size):
-                for c in range(channels):
-                    signal = input_signal[b, c]
-                    preemph_signal = np.concatenate([
-                        signal[:1],
-                        signal[1:] - preemph * signal[:-1]
-                    ])
-                    input_signal[b, c] = preemph_signal
-
-        batch_size, channels, time = input_signal.shape
-        num_frames = int(np.floor(time / hop_length) + 1)
-        print(f"batch_size: {batch_size}, channels: {channels}, time: {time}, num_frames: {num_frames}")
-
-        if num_frames <= 0:
-            raise ValueError(
-                f"Signal length ({time}) is too short for STFT with n_fft={n_fft} and hop_length={hop_length}. "
-                f"Need at least {n_fft} samples."
-            )
-
-        # Создаем мел-фильтр банк (Первый рабочий вариант)
-        # mel_fb = create_mel_filterbank_torch_compatible(
-        #     sr=sample_rate,
-        #     n_fft=n_fft,
-        #     n_mels=n_mels,
-        #     fmin=0.0,
-        #     fmax=sample_rate // 2
-        # )
-
-        # Создаем мел-фильтр банк (Второй рабочий вариант)
-        mel_fb = self._create_mel_filterbank()
-
-        # STFT и преобразование в mel-спектрограмму
-        mel_specs = []
-
-        for b in range(batch_size):
-            for c in range(channels):
-                signal = input_signal[b, c]
-
-                # STFT с точными параметрами как в PyTorch
-                stft_result = stft_numpy(
-                    signal,
-                    n_fft=n_fft,
-                    hop_length=hop_length,
-                    win_length=win_length,
-                    window='hann',
-                    center=True
-                )
-
-                # Power spectrogram (как в PyTorch: power=2.0)
-                power_spec = np.abs(stft_result) ** 2
-
-                # Убеждаемся что количество фреймов правильное
-                if power_spec.shape[1] > num_frames:
-                    power_spec = power_spec[:, :num_frames]
-                elif power_spec.shape[1] < num_frames:
-                    power_spec = np.pad(power_spec, ((0, 0), (0, num_frames - power_spec.shape[1])),
-                                        mode='constant', constant_values=0)
-
-                print(f"Power spec shape: {power_spec.shape}, min: {np.min(power_spec)}, max: {np.max(power_spec)}")
-
-                # Применяем mel-фильтры
-                mel_spec = np.dot(mel_fb, power_spec)
-                mel_specs.append(mel_spec)
-
-        mel_spectrogram = np.stack(mel_specs, axis=0).reshape(batch_size, channels, n_mels, num_frames)
-
-        print(f"Mel spectrogram shape: {mel_spectrogram.shape}")
-        print(f"Melspec NumPy: min={np.min(mel_spectrogram)}, max={np.max(mel_spectrogram)}")
-
-        # Логарифмирование
-        log_mel_spec = np.log(mel_spectrogram + log_zero_guard_value)
-        print(f"log_mel_spec NumPy: min={np.min(log_mel_spec)}, max={np.max(log_mel_spec)}")
-
-        # Сохраняем для сравнения
-        np.save("mel_spec_numpy_raw.npy", log_mel_spec)
-
-        # CMVN по временным фреймам (ТОЧНО как в PyTorch: dim=2)
-        mean = np.mean(log_mel_spec, axis=3, keepdims=True)  # axis=3 соответствует dim=2 в PyTorch
-        std = np.std(log_mel_spec, axis=3, keepdims=True)
-        log_mel_spec = (log_mel_spec - mean) / (std + 1e-6)
-
-        print(f"After CMVN: mean={np.mean(log_mel_spec)}, std={np.std(log_mel_spec)}")
-        np.save("mel_spec_numpy_cmvn.npy", log_mel_spec)
-
-        # Убираем измерение каналов если оно равно 1
-        if channels == 1:
-            log_mel_spec = log_mel_spec.squeeze(1)  # [batch, mel, time]
-
-        features = log_mel_spec.astype(np.float32)
-        features_len = np.array([num_frames], dtype=np.int64)
-
-        plt.figure(figsize=(10, 4))
-        plt.imshow(features[0], aspect="auto", origin="lower", interpolation="nearest")
-        plt.colorbar(label="Normalized Log Mel Energy")
-        plt.title("Mel-Spectrogram (After CMVN)")
-        plt.xlabel("Time Frames")
-        plt.ylabel("Mel Frequency Bins")
-        plt.tight_layout()
-        plt.show()
-
-        return features, features_len
+        preprocessor = NumPyPreprocessor(self.graphics_create,
+                                         self.window,
+                                         self.center,
+                                         self.mel_filterbank_type)
+        return preprocessor.extract_features(input_signal, length)
 
     def _encode(self,
                 features: np.ndarray,
@@ -582,7 +610,8 @@ class RnntASRNumPy:
     def decode_rnnt_greedy_improved(self,
                                     encoder_output: np.ndarray,
                                     ground_truth: str = None,
-                                    state_init: str = "zero"
+                                    state_init: str = "zero",
+                                    clean_transcription: bool = True
     ) -> Tuple[str, Dict[str, float], List[int]]:
         """Perform greedy decoding to transcribe encoded audio output.
 
@@ -606,7 +635,7 @@ class RnntASRNumPy:
         Notes
         -----
         - Applies blank and repeat penalties during decoding.
-        - Uses `_postprocess_improved` for final text cleanup.
+        - Uses `_postprocess_uncleaned` for final text cleanup.
         """
         max_len = encoder_output.shape[2]
         print(f"Starting improved greedy decoding with {max_len} time frames")
@@ -649,14 +678,17 @@ class RnntASRNumPy:
                 token_str = self.vocab[next_token] if next_token < len(self.vocab) else 'OUT_OF_VOCAB'
                 print(f"Step {t}: token={next_token}('{token_str}'), prob={probs[next_token]:.3f}")
 
-        text = self._postprocess_improved(hyp, "GD")
+        if clean_transcription == False:
+            text = self._postprocess_uncleaned(hyp, "greedy")
+        else:
+            text = self._postprocess_cleaned(hyp, "greedy")
         metrics = {}
         if ground_truth and text:
             metrics = return_metrics(transcription=text,
                                      ground_truth=ground_truth,
                                      metrics=metrics,
                                      total_log_prob=0.0,
-                                     flag="improved_greedy")
+                                     flag="greedy")
         return text, metrics, [t for t in range(len(hyp))]
 
     def decode_rnnt_beam_search_fixed(self,
@@ -668,7 +700,8 @@ class RnntASRNumPy:
                                       ground_truth: str = None,
                                       max_steps: int = 1000,
                                       min_tokens: int = 18,
-                                      state_init: str = "zero"
+                                      state_init: str = "zero",
+                                      clean_transcription: bool = True
     ) -> Tuple[str, Dict[str, float], List[int]]:
         """Perform fixed beam search decoding to transcribe encoded audio output.
 
@@ -705,9 +738,8 @@ class RnntASRNumPy:
         -----
         - Implements beam search with temperature scaling and penalties.
         - Prunes beams based on unique sequences and scores.
-        - Uses `_postprocess_improved` for final text cleanup.
+        - Uses `_postprocess_uncleaned` for final text cleanup.
         """
-
         if encoder_output.shape[0] != 1:
             raise ValueError(f"Expected batch_size=1, got {encoder_output.shape[0]}")
 
@@ -724,7 +756,7 @@ class RnntASRNumPy:
         beams = [(tuple(), 0.0, state, [], 0, 0, [])]
         temperature = 0.8
         blank_penalty = -2.0
-        repeat_penalty = 0.05  # Синхронизация с PyTorch, было 0.3
+        repeat_penalty = 0.05
         step = 0
         max_iterations = min(time_frames * 4, max_steps)
 
@@ -751,7 +783,8 @@ class RnntASRNumPy:
                     continue
 
                 print(f"DEBUG: t={curr_t}, raw logits_t for blank {self._blank_idx}: {logits_t[self._blank_idx]:.4f}")
-                non_blank_logits = np.delete(logits_t, self._blank_idx)
+                non_blank_logits = np.delete(logits_t,
+                                             self._blank_idx)
                 non_blank_vocab_indices = np.delete(np.arange(len(self.vocab)), self._blank_idx)
                 k_val = min(5, len(non_blank_logits))
                 top_5_raw_indices_in_non_blank_array = np.argsort(non_blank_logits)[-k_val:]
@@ -809,7 +842,10 @@ class RnntASRNumPy:
         print(f"Best raw sequence (token IDs): {best_seq}")
         print(f"Mapped raw sequence: {[vocab[idx] for idx in best_seq if idx < len(vocab)]}")
 
-        text = self._postprocess_improved(list(best_seq), "BS")
+        if clean_transcription == False:
+            text = self._postprocess_uncleaned(list(best_seq), "beam")
+        else:
+            text = self._postprocess_cleaned(list(best_seq), "beam")
 
         print(f"Fixed Beam Search completed:")
         print(f"  Transcription: '{text}'")
@@ -828,14 +864,14 @@ class RnntASRNumPy:
                 total_log_prob=best_score,
                 beam_width=beam_width,
                 length_penalty=length_penalty,
-                flag="BS"
+                flag="beam"
             )
 
         return text, metrics, timestamps
 
-    def _postprocess_improved(self,
+    def _postprocess_uncleaned(self,
                               decoded_ids: List[int],
-                              flag: str = "GD"
+                              flag: str = "greedy"
     ) -> str:
         """Postprocess decoded token IDs into a cleaned text string.
 
@@ -844,7 +880,7 @@ class RnntASRNumPy:
         decoded_ids : List[int]
             List of decoded token IDs from the model.
         flag : str, optional
-            Flag to indicate decoding method ('GD' or 'BS') for logging.
+            Flag to indicate decoding method ('greedy' or beam') for logging.
 
         Returns
         -------
@@ -872,20 +908,18 @@ class RnntASRNumPy:
                 last_word = word
 
         text = " ".join(cleaned_words).strip()
-        # Убираем только лишние знаки препинания в конце, если они не в середине
-        text = re.sub(r'(?<=\s)[.,!?]+$', '', text).strip()  # Удаляем только в конце после пробела
-        # Добавляем заглавную букву в начало, как в PyTorch
+        text = re.sub(r'(?<=\s)[.,!?]+$', '', text).strip()
         text = text[0].upper() + text[1:] if text else text
 
-        if flag == "GD":
+        if flag == "greedy":
             print(f"Final transcription (Improved Greedy Decoding): '{text}'")
-        elif flag == "BS":
+        elif flag == "beam":
             print(f"Final transcription (Improved Beam Search): '{text}'")
         return text
 
-    def _postprocess_improved_2(self,
+    def _postprocess_cleaned(self,
                                 decoded_ids: List[int],
-                                flag: str = "GD"
+                                flag: str = "greedy"
     ) -> str:
         """Alternative postprocessing method for decoded token IDs.
 
@@ -894,7 +928,7 @@ class RnntASRNumPy:
         decoded_ids : List[int]
             List of decoded token IDs from the model.
         flag : str, optional
-            Flag to indicate decoding method ('GD' or 'BS') for logging.
+            Flag to indicate decoding method ('greedy' or 'beam') for logging.
 
         Returns
         -------
@@ -903,14 +937,14 @@ class RnntASRNumPy:
 
         Notes
         -----
-        - Similar to `_postprocess_improved` but with stricter punctuation removal.
+        - Similar to `_postprocess_uncleaned` but with stricter punctuation removal.
         - Preserves double characters and normalizes whitespace.
         """
         valid_tokens = [self.vocab[tok_id] for tok_id in decoded_ids if
                         tok_id < len(self.vocab) and tok_id not in {self._blank_idx, self._pad_idx}]
         text = "".join(valid_tokens).replace("▁", " ").strip()
         text = re.sub(r'\s+', ' ', text)
-        text = re.sub(r'(.)\1{2,}', r'\1\1', text)  # Как в PyTorch версии
+        text = re.sub(r'(.)\1{2,}', r'\1\1', text)
 
         words = text.split()
         cleaned_words = []
@@ -923,9 +957,9 @@ class RnntASRNumPy:
         text = " ".join(cleaned_words).strip()
         text = re.sub(r'[.,!?]$', '', text).strip()
 
-        if flag == "GD":
+        if flag == "greedy":
             print(f"Final transcription (Improved Greedy Decoding): '{text}'")
-        elif flag == "BS":
+        elif flag == "beam":
             print(f"Final transcription (Improved Beam Search): '{text}'")
         return text
 
@@ -961,12 +995,14 @@ class RnntASRNumPy:
         - Runs inference using the ONNX decoder-joint session.
         - Normalizes logits to compute log probabilities safely.
         """
-        decoder_input = np.array([[prev_token]], dtype=np.int32)
+        decoder_input = np.array([[prev_token]],
+                                 dtype=np.int32)
 
         inputs = {
-            "encoder_outputs": full_encoder_out[:, :, t:t + 1].astype(np.float32),  # Slice for current time step
+            "encoder_outputs": full_encoder_out[:, :, t:t + 1].astype(np.float32),
             "targets": decoder_input,
-            "target_length": np.array([1], dtype=np.int32),
+            "target_length": np.array([1],
+                                      dtype=np.int32),
             "input_states_1": state[0],
             "input_states_2": state[1],
         }
@@ -976,12 +1012,11 @@ class RnntASRNumPy:
             inputs
         )
 
-        logits = np.squeeze(outputs[0])  # Should be (vocab_size,) for a single time step
+        logits = np.squeeze(outputs[0])
         print(f"Debug: _get_log_probs t={t}, logits shape={logits.shape}, min={logits.min()}, max={logits.max()}")
 
         new_state = (outputs[1], outputs[2])
 
-        # Safe log probabilities calculation
         exp_logits = np.exp(logits - np.max(logits))
         eps = 1e-10
         log_probs = np.log(exp_logits / (np.sum(exp_logits) + eps))
@@ -1098,7 +1133,7 @@ class RnntASRNumPy:
             return "", {}, []
         best_seq_tuple, (best_score, _, non_blank_count) = max(B.items(),
                                                                key=lambda x: x[1][0] / (
-                                                                           max(1, len(x[0])) ** length_penalty + 1e-6))
+                                                                       max(1, len(x[0])) ** length_penalty + 1e-6))
         best_seq = list(best_seq_tuple)
         text = self._postprocess_final(best_seq, "BS_ADVANCED")
 
@@ -1136,7 +1171,8 @@ class RnntASRNumPy:
         - Normalizes whitespace and punctuation.
         - Capitalizes the first letter for readability.
         """
-        tokens = [self.vocab[tok_id] for tok_id in decoded_ids if tok_id not in {self._blank_idx, self._pad_idx, self._unk_idx}]
+        tokens = [self.vocab[tok_id] for tok_id in decoded_ids if
+                  tok_id not in {self._blank_idx, self._pad_idx, self._unk_idx}]
         text = "".join(tokens).replace(" ", " ").strip()
         text = re.sub(r'(.)\1{2,}', r'\1', text)
         text = re.sub(r'\s+([.,!?])', r'\1', text)
@@ -1154,13 +1190,14 @@ class RnntASRNumPy:
 
     def recognize(self,
                   waveforms: np.ndarray,
-                  decode_flag: str = "GD",
+                  decode_flag: str = "greedy",
                   ground_truth: str = None,
                   max_steps: int = 3000,
                   min_tokens: int = 15,
                   state_init: str = "zero",
                   beam_width: int = 8,
-                  length_penalty: float = 0.7
+                  length_penalty: float = 0.7,
+                  clean_transcription: bool = True
     ) -> Tuple[str, List[int]]:
         """Recognize speech from raw audio waveforms using the specified decoding method.
 
@@ -1169,7 +1206,7 @@ class RnntASRNumPy:
         waveforms : np.ndarray
             Raw audio waveforms, expected shape [time] or [channels, time].
         decode_flag : str, optional
-            Decoding method ('GD', 'BS', or 'BS_ADVANCED') (default: 'GD').
+            Decoding method ('greedy', 'beam', or 'BS_ADVANCED') (default: 'greedy').
         ground_truth : str, optional
             Ground truth transcription for metric computation.
         max_steps : int, optional
@@ -1216,18 +1253,27 @@ class RnntASRNumPy:
         print(f"Predicted output length: {predicted_out_len}")
 
         features, features_len = self.extract_features(waveforms, audio_length)
-        print(f"features shape: {features.shape}, features_len: {features_len}")
+        print(f"Features shape: {features.shape}, features_len: {features_len}")
         if np.isnan(features).any() or np.isinf(features).any():
             print("Warning: features contain NaN or Inf values!")
 
-        plt.figure(figsize=(10, 4))
-        plt.imshow(features[0], aspect="auto", origin="lower", interpolation="nearest")
-        plt.colorbar(label="Normalized Log Mel Energy")
-        plt.title("Mel-Spectrogram (After CMVN)")
-        plt.xlabel("Time Frames")
-        plt.ylabel("Mel Frequency Bins")
-        plt.tight_layout()
-        plt.show()
+        if self.graphics_create:
+            if not os.path.exists(graphics_dir):
+                os.makedirs(graphics_dir)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{graphics_dir}/mel_spectrogram_CMVN_NumPy_{timestamp}.png"
+            plt.figure(figsize=(10, 4))
+            plt.imshow(features[0],
+                       aspect="auto",
+                       origin="lower",
+                       interpolation="nearest")
+            plt.colorbar(label="Normalized Log Mel Energy")
+            plt.title("Mel-Spectrogram (After CMVN)")
+            plt.xlabel("Time Frames")
+            plt.ylabel("Mel Frequency Bins")
+            plt.tight_layout()
+            plt.savefig(filename)
+            plt.close()
 
         features = features.astype(np.float32)
         features_len = features_len.astype(np.int64)
@@ -1235,11 +1281,12 @@ class RnntASRNumPy:
         encoder_out_data, encoder_out_lengths = self._encode(features, features_len)
         print(f"Encoder output data shape: {encoder_out_data.shape}, lengths: {encoder_out_lengths}")
 
-        if decode_flag == "GD":
+        if decode_flag == "greedy":
             transcription, _, timestamps = self.decode_rnnt_greedy_improved(encoder_out_data,
                                                                             ground_truth,
-                                                                            state_init)
-        elif decode_flag == "BS":
+                                                                            state_init,
+                                                                            clean_transcription)
+        elif decode_flag == "beam":
             transcription, _, timestamps = self.decode_rnnt_beam_search_fixed(encoder_out_data,
                                                                               self.vocab,
                                                                               self._blank_idx,
@@ -1248,16 +1295,17 @@ class RnntASRNumPy:
                                                                               ground_truth,
                                                                               max_steps,
                                                                               min_tokens,
-                                                                              state_init)
+                                                                              state_init,
+                                                                              clean_transcription)
 
-        elif  decode_flag == "BS_ADVANCED":
+        elif decode_flag == "BS_ADVANCED":
             transcription, _, timestamps = self.decode_rnnt_beam_search_advanced(
                 encoder_out_data,
                 beam_width=beam_width,
                 length_penalty=length_penalty,
-                ground_truth=ground_truth
+                ground_truth=ground_truth,
             )
         else:
-            raise ValueError("decode_flag must be 'GD' or 'BS'")
+            raise ValueError("decode_flag must be 'greedy', 'beam' or 'BS_ADVANCED'")
 
         return transcription, timestamps

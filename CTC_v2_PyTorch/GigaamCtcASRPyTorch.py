@@ -25,7 +25,7 @@ class GigaamCtcASRPyTorch(nn.Module):
     @torch.inference_mode()
     def __init__(self,
                  model_path: str
-     ) -> None:
+    ) -> None:
         """
         Initialize the GigaamCtcASR model with an ONNX model.
 
@@ -188,7 +188,6 @@ class GigaamCtcASRPyTorch(nn.Module):
         decoded_ids: List[int] = []
         total_log_prob = 0.0
         prev_tok = None
-        # prev_tok = BLANK_IDX
         for t, tok in enumerate(token_ids):
             total_log_prob += float(log_prob[t, tok])
             if tok > max_vocab_idx:
@@ -398,7 +397,6 @@ class GigaamCtcASRPyTorch(nn.Module):
         if np.any(np.isinf(log_probs)):
             raise ValueError("log probs contains Inf values")
 
-        # Декодирование с помощью beam search
         if decode_flag == "GD":
             transcription, _ = self.decode_ctc_greedy(
                 log_probs=log_probs,

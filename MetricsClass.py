@@ -510,7 +510,7 @@ def return_metrics(transcription: str,
                         beam_width=beam_width,
                         length_penalty=length_penalty,
                         flag=flag
-                        )
+    )
 
     print("Metrics:")
     for metric, value in metrics.items():
