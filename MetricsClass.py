@@ -17,7 +17,6 @@ import nltk
 nltk.download('punkt')
 nltk.download('wordnet')
 
-# from rouge_score import rouge_scorer  # Для ROUGE
 import pymorphy3
 from sentence_transformers import SentenceTransformer, util  # Для Semantic Similarity
 from bert_score import score as bert_score # Для BERTScore
@@ -45,26 +44,6 @@ morph = pymorphy3.MorphAnalyzer()
 
 phoneme_cache: Dict[str, List[str]] = {}
 
-# # Тест для проверки rouge-score
-# def test_rouge_scorer():
-#     scorer = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'], use_stemmer=False)
-#     # Простой тест на английском
-#     ref = "hello world"
-#     hyp = "hello world"
-#     scores = scorer.score(ref, hyp)
-#     print("Test ROUGE on English text:")
-#     for key in scores:
-#         print(f'{key}: {scores[key]}')
-#     # Тест на русском (нормализованном)
-#     ref_ru = "потому что в самолете все зависит от винта"
-#     hyp_ru = "потому что в самолете все зависит от винта"
-#     scores_ru = scorer.score(ref_ru, hyp_ru)
-#     print("Test ROUGE on Russian text:")
-#     for key in scores_ru:
-#         print(f'{key}: {scores_ru[key]}')
-#
-# # Вызов теста перед использованием return_metrics
-# test_rouge_scorer()
 def compute_rouge_manual(reference: str,
                          hypothesis: str
 ) -> Dict[str, float]:
@@ -144,91 +123,6 @@ def normalize_text(text: str) -> str:
     text = re.sub(r'[^\w\s]', '', text.lower())  # Удаляем пунктуацию
     text = re.sub(r'\s+', ' ', text).strip()     # Удаляем двойные пробелы
     return text
-
-def lemmatize_text(text: str) -> str:
-    """
-    Lemmatize text using pymorphy2 for Russian language.
-
-    Parameters
-    ----------
-    text : str
-        Input text to lemmatize.
-
-    Returns
-    -------
-    str
-        Lemmatized text (words in normal form, joined by spaces).
-    """
-    return " ".join(morph.parse(word)[0].normal_form for word in text.split())
-
-def get_phonemes(text: str) -> List[str]:
-    """
-    Convert text to phonemes using phonemizer with caching.
-
-    Parameters
-    ----------
-    text : str
-        Input text to convert to phonemes.
-
-    Returns
-    -------
-    List[str]
-        List of phonemes.
-
-    Notes
-    -----
-    Uses a global cache (phoneme_cache) to avoid recomputing phonemes for the same text.
-    """
-    if text in phoneme_cache:
-        return phoneme_cache[text]
-    phonemes = phonemize(text,
-                         language='ru',
-                         backend='espeak').split()
-    phoneme_cache[text] = phonemes
-    return phonemes
-
-def ensure_espeak_in_path() -> None:
-    """
-    Ensure that espeak is available in the system PATH for phonemizer.
-
-    Raises
-    ------
-    subprocess.CalledProcessError
-        If espeak version check fails.
-    FileNotFoundError
-        If espeak executable is not found.
-    """
-    current_path = os.environ.get("PATH", "")
-    print(f"Current PATH: {current_path}")
-
-    venv_path = os.path.abspath(os.path.join(os.path.dirname(__file__), ".venv", "Scripts"))
-    espeak_venv_path = os.path.join(venv_path, "command_line", "espeak.exe")
-
-    if os.path.exists(espeak_venv_path):
-        print(f"Found espeak.exe in virtual environment: {espeak_venv_path}")
-        command_line_path = os.path.dirname(espeak_venv_path)
-        if command_line_path not in current_path:
-            os.environ["PATH"] = f"{command_line_path}{os.pathsep}{current_path}"
-            print(f"Added {command_line_path} to PATH: {os.environ['PATH']}")
-    else:
-        print(f"espeak.exe not found in {espeak_venv_path}. Falling back to system path.")
-        espeak_system_path = r"C:\Program Files (x86)\eSpeak\command_line"
-        if espeak_system_path not in current_path:
-            print(f"Adding {espeak_system_path} to PATH.")
-            os.environ["PATH"] = f"{espeak_system_path}{os.pathsep}{current_path}"
-            print(f"Updated PATH: {os.environ['PATH']}")
-        else:
-            print(f"{espeak_system_path} already in PATH.")
-
-    try:
-        result = subprocess.run(["espeak", "--version"],
-                                capture_output=True,
-                                text=True,
-                                check=True)
-        print(f"espeak version: {result.stdout.strip()}")
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        print(f"Error verifying espeak: {e}")
-        raise
 
 def round_metrics(metrics: Dict[str, float],
                   precision: int = 14
@@ -476,13 +370,6 @@ def return_metrics(transcription: str,
         metrics["Semantic Similarity"] = None
 
     # Phoneme Error Rate (PER)
-    try:
-        ref_phonemes = get_phonemes(ground_truth)
-        hyp_phonemes = get_phonemes(transcription)
-        metrics["PER"] = wer(" ".join(ref_phonemes), " ".join(hyp_phonemes))
-    except Exception as e:
-        print(f"Error computing PER with phonemizer: {e}")
-        metrics["PER"] = None
 
     # METEOR
     try:

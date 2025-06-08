@@ -95,7 +95,7 @@ class GigaamCtcASRPyTorch(nn.Module):
     def forward(self,
                 input_signal: Tensor,
                 length: Tensor
-                ) -> Tuple[Tensor, Tensor]:
+    ) -> Tuple[Tensor, Tensor]:
         """
         Extract Log-mel spectrogram features from the input audio signal.
 
@@ -146,7 +146,7 @@ class GigaamCtcASRPyTorch(nn.Module):
                           blank_idx: int,
                           max_vocab_idx: int,
                           ground_truth: str = None
-                          ) -> Tuple[str, Dict[str, float]]:
+    ) -> Tuple[str, Dict[str, float]]:
         """
         Perform greedy decoding on CTC log probabilities to produce a transcription.
 
@@ -340,7 +340,7 @@ class GigaamCtcASRPyTorch(nn.Module):
 
     def recognize(self,
                   waveforms: np.ndarray[np.float32],
-                  decode_flag: str = "GD",
+                  decode_flag: str = "greedy",
                   beam_width: int = 10,
                   length_penalty: float = 0.7,
                   ground_truth: str = None
@@ -353,7 +353,7 @@ class GigaamCtcASRPyTorch(nn.Module):
         waveforms : npt.NDArray[np.float32]
             Input waveform, shape [samples, channels]. Expected to be in float32 format.
         decode_flag : str, optional
-            Decoding method: "GD" for greedy decoding, "BS" for beam search. Defaults to "BS".
+            Decoding method: "greedy" for greedy decoding, "beam" for beam search. Defaults to "beam".
         beam_width : int, optional
             Number of beams for beam search decoding. Defaults to 10.
         length_penalty : float, optional
@@ -397,7 +397,7 @@ class GigaamCtcASRPyTorch(nn.Module):
         if np.any(np.isinf(log_probs)):
             raise ValueError("log probs contains Inf values")
 
-        if decode_flag == "GD":
+        if decode_flag == "greedy":
             transcription, _ = self.decode_ctc_greedy(
                 log_probs=log_probs,
                 vocab=self.vocab,
@@ -405,7 +405,7 @@ class GigaamCtcASRPyTorch(nn.Module):
                 max_vocab_idx=self.max_vocab_idx,
                 ground_truth=ground_truth
             )
-        elif decode_flag == "BS":
+        elif decode_flag == "beam":
             transcription, _ = self.decode_ctc_beam_search(
                 log_probs=log_probs,
                 vocab=self.vocab,

@@ -639,40 +639,35 @@ class RnntASRNumPy:
         """
         max_len = encoder_output.shape[2]
         print(f"Starting improved greedy decoding with {max_len} time frames")
-
         if state_init == "random":
             state = (np.random.normal(0, 0.01, (1, 1, self.hidden_size)).astype(np.float32),
                      np.random.normal(0, 0.01, (1, 1, self.hidden_size)).astype(np.float32))
         else:
             state = (np.zeros((1, 1, self.hidden_size), dtype=np.float32),
                      np.zeros((1, 1, self.hidden_size), dtype=np.float32))
-
         hyp = []
+        total_log_prob = 0.0
         blank_penalty = -0.5
         repeat_penalty = 0.1
-
         for t in range(max_len):
             current_encoder_out = encoder_output[:, :, t:t + 1]
             logits, _, state = self._decode(hyp, state, current_encoder_out)
             logits = logits.copy()
-
-            # Применяем штрафы как в PyTorch версии
             if self._blank_idx < len(logits):
                 logits[self._blank_idx] += blank_penalty
             if self._pad_idx < len(logits):
                 logits[self._pad_idx] -= 5.0
-
-            # Нормализация логитов
             logits = logits - np.max(logits)
-            probs = np.exp(logits) / (np.sum(np.exp(logits)) + 1e-12)
+            probs = np.exp(logits) / (np.sum(np.exp(logits)))
 
-            # Штраф за повторы
             if hyp and hyp[-1] != self._blank_idx:
                 probs[hyp[-1]] *= repeat_penalty
 
             next_token = np.argmax(probs).item()
             if next_token != self._blank_idx and (not hyp or next_token != hyp[-1]):
                 hyp.append(next_token)
+                # Добавляем логарифм вероятности для выбранного токена
+                total_log_prob += np.log(probs[next_token])
 
             if t % 5 == 0:
                 token_str = self.vocab[next_token] if next_token < len(self.vocab) else 'OUT_OF_VOCAB'
@@ -687,7 +682,7 @@ class RnntASRNumPy:
             metrics = return_metrics(transcription=text,
                                      ground_truth=ground_truth,
                                      metrics=metrics,
-                                     total_log_prob=0.0,
+                                     total_log_prob=total_log_prob,
                                      flag="greedy")
         return text, metrics, [t for t in range(len(hyp))]
 
@@ -946,16 +941,18 @@ class RnntASRNumPy:
         text = re.sub(r'\s+', ' ', text)
         text = re.sub(r'(.)\1{2,}', r'\1\1', text)
 
+        # Удаляем все знаки препинания и приводим к нижнему регистру для clean_transcription
+        text = re.sub(r'[.,!?;:()"\'-]', '', text).lower()
+
         words = text.split()
         cleaned_words = []
         last_word = None
         for word in words:
-            if word and (not last_word or word.lower() != last_word.lower() or len(word) <= 2):
+            if word and (not last_word or word != last_word or len(word) <= 2):
                 cleaned_words.append(word)
                 last_word = word
 
         text = " ".join(cleaned_words).strip()
-        text = re.sub(r'[.,!?]$', '', text).strip()
 
         if flag == "greedy":
             print(f"Final transcription (Improved Greedy Decoding): '{text}'")

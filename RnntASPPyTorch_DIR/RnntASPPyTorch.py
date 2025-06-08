@@ -354,7 +354,7 @@ class RnntASRPyTorch:
                 prev_tokens: List[int],
                 prev_state: Tuple[np.ndarray, np.ndarray],
                 encoder_out: np.ndarray
-                ) -> Tuple[np.ndarray, int, Tuple[np.ndarray, np.ndarray]]:
+    ) -> Tuple[np.ndarray, int, Tuple[np.ndarray, np.ndarray]]:
         """Decode a single step using the ONNX decoder-joint model.
 
         Parameters
@@ -382,8 +382,10 @@ class RnntASRPyTorch:
         prev_token = self._blank_idx if not prev_tokens else prev_tokens[-1]
         inputs = {
             "encoder_outputs": encoder_out.astype(np.float32),
-            "targets": np.array([[prev_token]], dtype=np.int32),
-            "target_length": np.array([1], dtype=np.int32),
+            "targets": np.array([[prev_token]],
+                                dtype=np.int32),
+            "target_length": np.array([1],
+                                      dtype=np.int32),
             "input_states_1": prev_state[0],
             "input_states_2": prev_state[1],
         }
@@ -391,7 +393,8 @@ class RnntASRPyTorch:
 
         if encoder_out.shape[2] == 0:
             print(f"Error: encoder_out is empty at t={len(prev_tokens)}, returning dummy logits")
-            dummy_logits = np.zeros((len(self.vocab),), dtype=np.float32)
+            dummy_logits = np.zeros((len(self.vocab),),
+                                    dtype=np.float32)
             return dummy_logits, -1, (prev_state[0], prev_state[1])
 
         outputs = self._decoder_joint.run(
@@ -415,7 +418,8 @@ class RnntASRPyTorch:
     def decode_rnnt_greedy_improved(self,
                                     encoder_output: np.ndarray,
                                     ground_truth: str = None,
-                                    state_init: str = "zero"
+                                    state_init: str = "zero",
+                                    clean_transcription: bool = True
     ) -> Tuple[str, Dict[str, float], List[int]]:
         """Perform greedy decoding to transcribe encoded audio output.
 
@@ -450,6 +454,7 @@ class RnntASRPyTorch:
             state = (np.zeros((1, 1, self.hidden_size), dtype=np.float32),
                      np.zeros((1, 1, self.hidden_size), dtype=np.float32))
         hyp = []
+        total_log_prob = 0.0
         blank_penalty = -0.5
         repeat_penalty = 0.1
         for t in range(max_len):
@@ -469,17 +474,23 @@ class RnntASRPyTorch:
             next_token = np.argmax(probs).item()
             if next_token != self._blank_idx and (not hyp or next_token != hyp[-1]):
                 hyp.append(next_token)
+                # Добавляем логарифм вероятности для выбранного токена
+                total_log_prob += np.log(probs[next_token])
+
             if t % 5 == 0:
                 token_str = self.vocab[next_token] if next_token < len(self.vocab) else 'OUT_OF_VOCAB'
                 print(f"Step {t}: token={next_token}('{token_str}'), prob={probs[next_token]:.3f}")
 
-        text = self._postprocess_improved(hyp, "greedy")
+        if clean_transcription == False:
+            text = self._postprocess_uncleaned(hyp, "greedy")
+        else:
+            text = self._postprocess_cleaned(hyp, "greedy")
         metrics = {}
         if ground_truth and text:
             metrics = return_metrics(transcription=text,
                                      ground_truth=ground_truth,
                                      metrics=metrics,
-                                     total_log_prob=0.0,
+                                     total_log_prob=total_log_prob,
                                      flag="greedy")
         return text, metrics, [t for t in range(len(hyp))]
 
@@ -492,7 +503,8 @@ class RnntASRPyTorch:
                                       ground_truth: str = None,
                                       max_steps: int = 1000,
                                       min_tokens: int = 18,
-                                      state_init: str = "zero"
+                                      state_init: str = "zero",
+                                      clean_transcription: bool = True
     ) -> Tuple[str, Dict[str, float], List[int]]:
         """Perform fixed beam search decoding to transcribe encoded audio output.
 
@@ -632,7 +644,10 @@ class RnntASRPyTorch:
         print(f"Best raw sequence (token IDs): {best_seq}")
         print(f"Mapped raw sequence: {[vocab[idx] for idx in best_seq if idx < len(vocab)]}")
 
-        text = self._postprocess_improved(list(best_seq), "beam")
+        if clean_transcription == False:
+            text = self._postprocess_uncleaned(list(best_seq), "beam")
+        else:
+            text = self._postprocess_cleaned(list(best_seq), "beam")
 
         print(f"Fixed Beam Search completed:")
         print(f"  Transcription: '{text}'")
@@ -659,7 +674,7 @@ class RnntASRPyTorch:
     def _postprocess_uncleaned(self,
                                decoded_ids: List[int],
                                flag: str = "greedy"
-                               ) -> str:
+    ) -> str:
         """Postprocess decoded token IDs into a cleaned text string.
 
         Parameters
@@ -733,16 +748,18 @@ class RnntASRPyTorch:
         text = re.sub(r'\s+', ' ', text)
         text = re.sub(r'(.)\1{2,}', r'\1\1', text)
 
+        # Удаляем все знаки препинания и приводим к нижнему регистру для clean_transcription
+        text = re.sub(r'[.,!?;:()"\'-]', '', text).lower()
+
         words = text.split()
         cleaned_words = []
         last_word = None
         for word in words:
-            if word and (not last_word or word.lower() != last_word.lower() or len(word) <= 2):
+            if word and (not last_word or word != last_word or len(word) <= 2):
                 cleaned_words.append(word)
                 last_word = word
 
         text = " ".join(cleaned_words).strip()
-        text = re.sub(r'[.,!?]$', '', text).strip()
 
         if flag == "greedy":
             print(f"Final transcription (Improved Greedy Decoding): '{text}'")
@@ -758,7 +775,8 @@ class RnntASRPyTorch:
                   min_tokens: int = 15,
                   state_init: str = "zero",
                   beam_width: int = 8,
-                  length_penalty: float = 0.7
+                  length_penalty: float = 0.7,
+                  clean_transcription: bool = True
     ) -> Tuple[str, List[int]]:
         """Recognize speech from raw audio waveforms using the specified decoding method.
 
@@ -823,9 +841,12 @@ class RnntASRPyTorch:
             if not os.path.exists(graphics_dir):
                 os.makedirs(graphics_dir)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"{graphics_dir}/mel_spectrogram_PyTorch_{timestamp}.png"
+            filename = f"{graphics_dir}/mel_spectrogram_PyTorch_2_{timestamp}.png"
             plt.figure(figsize=(10, 4))
-            plt.imshow(features[0].cpu().numpy(), aspect="auto", origin="lower", interpolation="nearest")
+            plt.imshow(features[0].cpu().numpy(),
+                       aspect="auto",
+                       origin="lower",
+                       interpolation="nearest")
             plt.colorbar(label="Normalized Log Mel Energy")
             plt.title("Mel-Spectrogram (After Normalization)")
             plt.xlabel("Time Frames")
@@ -843,7 +864,8 @@ class RnntASRPyTorch:
         if decode_flag == "greedy":
             transcription, _, timestamps = self.decode_rnnt_greedy_improved(encoder_out_data,
                                                                             ground_truth,
-                                                                            state_init)
+                                                                            state_init,
+                                                                            clean_transcription)
         elif decode_flag == "beam":
             transcription, _, timestamps = self.decode_rnnt_beam_search_fixed(encoder_out_data,
                                                                               self.vocab,
@@ -853,7 +875,8 @@ class RnntASRPyTorch:
                                                                               ground_truth,
                                                                               max_steps,
                                                                               min_tokens,
-                                                                              state_init)
+                                                                              state_init,
+                                                                              clean_transcription)
         else:
             raise ValueError("decode_flag must be 'greedy' or 'beam'")
 

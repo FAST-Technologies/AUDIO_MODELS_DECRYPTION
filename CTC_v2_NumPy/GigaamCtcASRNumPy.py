@@ -276,7 +276,7 @@ class GigaamCtcASRNumPy:
                           blank_idx: int,
                           max_vocab_idx: int,
                           ground_truth: str = None
-                          ) -> Tuple[str, Dict[str, float]]:
+    ) -> Tuple[str, Dict[str, float]]:
         """
         Perform greedy decoding on CTC log probabilities to produce a transcription.
 
@@ -470,7 +470,7 @@ class GigaamCtcASRNumPy:
 
     def recognize(self,
                   waveforms: np.ndarray,
-                  decode_flag: str = "GD",
+                  decode_flag: str = "greedy",
                   beam_width: int = 10,
                   length_penalty: float = 0.7,
                   ground_truth: str = None
@@ -483,7 +483,7 @@ class GigaamCtcASRNumPy:
         waveforms : np.ndarray
             Input waveform, shape [channels, samples] or [samples]. Expected to be in float32 format.
         decode_flag : str, optional
-            Decoding method: "GD" for greedy decoding, "BS" for beam search. Defaults to "GD".
+            Decoding method: "greedy" for greedy decoding, "beam" for beam search. Defaults to "greedy".
         beam_width : int, optional
             Number of beams for beam search decoding. Defaults to 10.
         length_penalty : float, optional
@@ -546,7 +546,7 @@ class GigaamCtcASRNumPy:
         elif len(log_probs.shape) != 3:
             raise ValueError(f"Unexpected shape for log_probs: {log_probs.shape}")
 
-        if decode_flag == "GD":
+        if decode_flag == "greedy":
             transcription, metrics = self.decode_ctc_greedy(
                 log_probs=log_probs,
                 vocab=self.vocab,
@@ -554,7 +554,7 @@ class GigaamCtcASRNumPy:
                 max_vocab_idx=self.max_vocab_idx,
                 ground_truth=ground_truth
             )
-        elif decode_flag == "BS":
+        elif decode_flag == "beam":
             transcription, metrics = self.decode_ctc_beam_search(
                 log_probs=log_probs,
                 vocab=self.vocab,
@@ -565,6 +565,6 @@ class GigaamCtcASRNumPy:
                 ground_truth=ground_truth
             )
         else:
-            raise ValueError(f"Invalid decode_flag: {decode_flag}. Must be 'GD' or 'BS'.")
+            raise ValueError(f"Invalid decode_flag: {decode_flag}. Must be 'greedy' or 'beam'.")
 
         return transcription, metrics
