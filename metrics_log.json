@@ -1588,5 +1588,35 @@
             "METEOR": 0.89298184357542,
             "BERTScore": 0.97010272741318
         }
+    },
+    {
+        "timestamp": "2025-06-09T01:58:51.034481",
+        "flag": "greedy",
+        "ground_truth": "мне необходимо вам рассказать следующую историю о своей жизни чем четче я говорю тем лучше результат я получу",
+        "transcription": "мне необходимо вам рассказать следующую историю о своей жизни чем четче я говорю тем лучше результат я получу",
+        "total_log_prob": -2.8220165165776763,
+        "metrics": {
+            "WER": 0.0,
+            "CER": 0.0,
+            "MER": 0.0,
+            "WIL": 0.0,
+            "WIP": 1.0,
+            "RIL": 0.0,
+            "WER_torchmetrics": 0.0,
+            "CER_torchmetrics": 0.0,
+            "WIL_torchmetrics": 0.0,
+            "MER_torchmetrics": 0.0,
+            "WIP_torchmetrics": 1.0,
+            "RIL_torchmetrics": 0.0,
+            "BLEU": 1.0,
+            "BLEU_torchmetrics": 1.0,
+            "ROUGE-1": 0.94444444444444,
+            "ROUGE-2": 1.0,
+            "ROUGE-L": 1.0,
+            "Semantic Similarity": null,
+            "PER": null,
+            "METEOR": 0.99991426611797,
+            "BERTScore": null
+        }
     }
 ]
